@@ -1,3 +1,4 @@
+use std::mem;
 use chrono::{DateTime, Utc};
 use sha2::{Sha512, Digest};
 
@@ -187,22 +188,33 @@ impl Blockchain {
         }
     }
 
+    fn append_block(&mut self, mut block: Block) -> BlockAdditionResult {
+        match &mut self.last_block {
+            None => {
+                let block_hash = block.hash.unwrap();
+                self.last_block = Some(Box::new(block));
+                BlockAdditionResult {
+                    block_number: 0,
+                    block_hash,
+                }
+            }
+            Some(tail) => {
+                let old_tail = mem::replace(tail, Box::new(block));
+                tail.previous_block = Some(old_tail);
+                BlockAdditionResult {
+                    block_number: 0,
+                    block_hash: tail.hash.unwrap(),
+                }
+            }
+        }
+    }
+
     pub fn submit_block(&mut self, mut block: Block) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
         match self.validator.block_valid(&block) {
             Ok(_) => {
-                let block_hash = block.hash.unwrap();
                 block.time = Some(Utc::now());
                 self.chain_length += 1;
-                match &self.last_block {
-                    None => Ok(BlockAdditionResult {
-                        block_number: 0,
-                        block_hash,
-                    }),
-                    Some(block) => Ok(BlockAdditionResult {
-                        block_number: self.chain_length - 1,
-                        block_hash,
-                    })
-                }
+                Ok(self.append_block(block))
             }
             Err(error) => Err(error)
         }
