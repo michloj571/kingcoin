@@ -32,15 +32,22 @@ pub struct Transaction {
     source_address: String,
     target_address: String,
     message: String,
-    amount: i64,
     // in Kingcoin's smallest unit
+    amount: i64,
     time: DateTime<Utc>,
+}
+
+#[derive(Copy, Clone)]
+pub struct BlockKey {
+    //todo consider moving timestamp here
+    hash: [u8; 64],
+    previous_hash: Option<[u8; 64]>,
 }
 
 pub struct Block {
     previous_block: BlockPointer,
     data: Vec<Transaction>,
-    hash: BlockHash,
+    key: BlockKey,
     time: CommitTime,
     nonce: i64,
     block_number: i64,
@@ -114,29 +121,63 @@ impl ToString for Transaction {
     }
 }
 
+impl ToString for BlockKey {
+    fn to_string(&self) -> String {
+        todo!() // hash to string representation
+    }
+}
+
 //todo consider introducing designated types
 type CommitTime = Option<DateTime<Utc>>;
-type BlockHash = Option<[u8; 64]>;
 type BlockPointer = Option<Box<Block>>;
+
+
+impl BlockKey {
+    fn empty() -> BlockKey {
+        BlockKey {
+            hash: [0; 64],
+            previous_hash: None,
+        }
+    }
+
+    fn attach_previous(&mut self, block: &Block) {
+        self.previous_hash = block.get_key().previous_hash;
+    }
+
+    fn hash_to_string(value: [u8; 64]) -> String {
+        todo!()
+    }
+
+    pub fn get_raw_hash(&self) -> [u8; 64] {
+        self.hash
+    }
+
+    pub fn get_hash(&self) -> String {
+        BlockKey::hash_to_string(self.hash)
+    }
+}
 
 impl Block {
     fn new(
         previous_block: BlockPointer,
         data: Vec<Transaction>,
         block_number: i64,
+        key: BlockKey,
     ) -> Block {
         Block {
             previous_block,
             data,
-            hash: None,
+            key,
             time: None,
             nonce: 0,
             block_number,
         }
     }
 
-    fn genesis_block(data: Vec<Transaction>) -> Block {
-        Block::new(None, data, 0)
+    fn submit_transactions(data: Vec<Transaction>) -> Block {
+        Block::new(
+            None, data, -1, BlockKey::empty()
+        )
     }
 
     fn summarize_transactions(transactions: &Vec<Transaction>) -> String {
@@ -146,20 +187,28 @@ impl Block {
             .collect::<String>()
     }
 
-    fn hash(transaction_summary: String, nonce: i64) -> [u8; 64] {
+    fn hash(transaction_summary: String, nonce: i64) -> BlockKey {
         let mut hasher = Sha512::new();
         hasher.update(transaction_summary.as_bytes());
         hasher.update(&nonce.to_be_bytes());
-        hasher.finalize()
+        let value: [u8; 64] = hasher.finalize()
             .as_slice()
             .try_into()
-            .expect("Wrong output length")
+            .expect("Wrong output length");
+        BlockKey {
+            hash: value,
+            previous_hash: None,
+        }
     }
 
     pub fn hash_block(&mut self, nonce: i64) {
         let transaction_summary = Block::summarize_transactions(&self.data);
-        self.hash = Some(Block::hash(transaction_summary, nonce));
+        self.key = Block::hash(transaction_summary, nonce);
         self.nonce = nonce;
+    }
+
+    pub fn get_key(&self) -> BlockKey {
+        self.key
     }
 }
 
@@ -172,8 +221,10 @@ impl Summary<Block> for Block {
             .for_each(|summary| transactions.push_str(&summary));
         format!(
             "Timestamp: {},
-             Transaction summary: {}",
-            self.time.unwrap(), transactions
+             Transaction summary: {},
+             {}",
+            self.time.unwrap(), transactions,
+            self.get_key().to_string()
         )
     }
 }
@@ -189,34 +240,35 @@ impl Blockchain {
     }
 
     fn append_block(&mut self, mut block: Block) -> BlockAdditionResult {
+        let block_number = self.chain_length;
+        let block_hash = block.key.hash;
+        block.block_number = block_number;
         match &mut self.last_block {
             None => {
-                let block_hash = block.hash.unwrap();
                 self.last_block = Some(Box::new(block));
-                BlockAdditionResult {
-                    block_number: 0,
-                    block_hash,
-                }
             }
             Some(tail) => {
                 let old_tail = mem::replace(tail, Box::new(block));
+                tail.key.attach_previous(&old_tail);
                 tail.previous_block = Some(old_tail);
-                BlockAdditionResult {
-                    block_number: 0,
-                    block_hash: tail.hash.unwrap(),
-                }
             }
+        }
+        self.chain_length += 1;
+        BlockAdditionResult {
+            block_number,
+            block_hash,
         }
     }
 
-    pub fn submit_block(&mut self, mut block: Block) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
+    pub fn submit(&mut self, mut block: Block) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
         match self.validator.block_valid(&block) {
             Ok(_) => {
                 block.time = Some(Utc::now());
-                self.chain_length += 1;
                 Ok(self.append_block(block))
             }
             Err(error) => Err(error)
         }
     }
+
+    //todo add utility function for searching in the blockchain
 }

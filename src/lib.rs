@@ -1,2 +1,2 @@
-mod blockchain;
-mod network;
+pub mod blockchain;
+pub mod network;
