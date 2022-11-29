@@ -31,6 +31,7 @@ pub struct BlockAdditionResult {
     block_number: i64,
     block_hash: [u8; 64],
 }
+
 pub struct Transaction {
     source_address: String,
     target_address: String,
@@ -228,7 +229,7 @@ impl Summary<Block> for Block {
 }
 
 impl Blockchain {
-    fn new(validator: Box<dyn Validate>, criteria: Box<dyn Criteria>) -> Blockchain {
+    pub fn new(validator: Box<dyn Validate>, criteria: Box<dyn Criteria>) -> Blockchain {
         Blockchain {
             last_block: None,
             chain_length: 0,
@@ -256,6 +257,14 @@ impl Blockchain {
             block_number,
             block_hash,
         }
+    }
+
+    pub fn get_criteria(&self) -> &dyn Criteria {
+        &*self.criteria
+    }
+
+    pub fn update_criteria(&mut self, criteria: Box<dyn Criteria>) {
+        self.criteria = criteria
     }
 
     pub fn submit(&mut self, mut block: Block) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
