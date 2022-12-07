@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 sha2 = "0.10.6"
 chrono = "0.4.23"
-hex-literal = "0.3.4"
+array-bytes = "6.0.0"

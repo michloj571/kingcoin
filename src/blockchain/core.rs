@@ -1,10 +1,13 @@
 use std::mem;
 use chrono::{DateTime, Utc};
 use sha2::{Sha512, Digest};
+use crate::blockchain::Address;
 
 //todo consider introducing designated types
 type CommitTime = Option<DateTime<Utc>>;
 type BlockPointer = Option<Box<Block>>;
+
+
 
 trait Summary<T> {
     fn get_summary(&self) -> String;
@@ -28,16 +31,18 @@ pub struct BlockValidationError {
 }
 
 pub struct BlockAdditionResult {
-    block_number: i64,
+    block_number: u64,
     block_hash: [u8; 64],
 }
 
+
+
 pub struct Transaction {
-    source_address: String,
-    target_address: String,
-    message: String,
+    source_address: Address,
+    target_address: Address,
+    title: String,
     // in Kingcoin's smallest unit
-    amount: i64,
+    amount: u64,
     time: DateTime<Utc>,
 }
 
@@ -54,12 +59,12 @@ pub struct Block {
     key: BlockKey,
     time: CommitTime,
     nonce: i64,
-    block_number: i64,
+    block_number: u64,
 }
 
 pub struct Blockchain {
     last_block: BlockPointer,
-    chain_length: i64,
+    chain_length: u64,
     validator: Box<dyn Validate>,
     criteria: Box<dyn Criteria>,
 }
@@ -85,16 +90,16 @@ impl BlockValidationError {
 
 impl Transaction {
     pub fn new(
-        source_address: String,
-        target_address: String,
+        source_address: Address,
+        target_address: Address,
         message: String,
-        amount: i64,
+        amount: u64,
         time: DateTime<Utc>,
     ) -> Transaction {
         Transaction {
             source_address,
             target_address,
-            message,
+            title: message,
             amount,
             time,
         }
@@ -111,10 +116,9 @@ impl Summary<Transaction> for Transaction {
               Amount: {},
               Time: {}
              ]",
-            self.source_address,
-            self.target_address,
-            self.message, self.amount,
-            self.time
+            array_bytes::bytes2hex("", self.source_address),
+            array_bytes::bytes2hex("", self.target_address),
+            self.title, self.amount, self.time
         )
     }
 }
@@ -127,7 +131,20 @@ impl ToString for Transaction {
 
 impl ToString for BlockKey {
     fn to_string(&self) -> String {
-        todo!() // hash to string representation
+        let previous_hash = match &self.previous_hash {
+            None => {
+                String::from("BEGIN")
+            }
+            Some(value) => {
+                array_bytes::bytes2hex("", value)
+            }
+        };
+        format!(
+            "{}:{}",
+            array_bytes::bytes2hex("", previous_hash),
+            array_bytes::bytes2hex("", self.hash)
+
+        )
     }
 }
 
@@ -160,7 +177,7 @@ impl Block {
     fn new(
         previous_block: BlockPointer,
         data: Vec<Transaction>,
-        block_number: i64,
+        block_number: u64,
         key: BlockKey,
     ) -> Block {
         Block {
@@ -175,7 +192,7 @@ impl Block {
 
     fn submit_transactions(data: Vec<Transaction>) -> Block {
         Block::new(
-            None, data, -1, BlockKey::empty(),
+            None, data, 0, BlockKey::empty(),
         )
     }
 
