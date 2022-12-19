@@ -4,6 +4,9 @@ mod access;
 
 pub const WALLET_ADDRESS_SIZE: usize = 32;
 
+pub trait BlockchainData {
+}
+
 pub struct Address {
     value: [u8; WALLET_ADDRESS_SIZE],
 }

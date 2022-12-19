@@ -1,12 +1,14 @@
 use std::mem;
 use chrono::{DateTime, Utc};
 use sha2::{Sha512, Digest};
-use crate::blockchain::Address;
+use serde::{Serialize, Deserialize};
+use crate::blockchain::{Address, BlockchainData};
+use crate::BlockHash;
+use crate::network::Transaction;
 
 //todo consider introducing designated types
 type CommitTime = Option<DateTime<Utc>>;
-type BlockPointer = Option<Box<Block>>;
-
+type BlockPointer<T> = Option<Box<Block<T>>>;
 
 
 trait Summary<T> {
@@ -22,7 +24,7 @@ pub trait Criteria {
 }
 
 pub trait Validate {
-    fn block_valid(&self, block: &Block) -> Result<(), Box<dyn BlockchainError>>;
+    fn block_valid<T>(&self, block: &Block<T>) -> Result<(), Box<dyn BlockchainError>> ;
 }
 
 pub struct BlockValidationError {
@@ -32,38 +34,28 @@ pub struct BlockValidationError {
 
 pub struct BlockAdditionResult {
     block_number: u64,
-    block_hash: [u8; 64],
+    block_hash: BlockHash,
 }
 
-
-
-pub struct Transaction {
-    source_address: Address,
-    target_address: Address,
-    title: String,
-    // in Kingcoin's smallest unit
-    amount: u64,
-    time: DateTime<Utc>,
-}
 
 #[derive(Copy, Clone)]
 pub struct BlockKey {
     //todo consider moving timestamp here
-    hash: [u8; 64],
-    previous_hash: Option<[u8; 64]>,
+    hash: BlockHash,
+    previous_hash: Option<BlockHash>,
 }
 
-pub struct Block {
-    previous_block: BlockPointer,
-    data: Vec<Transaction>,
+pub struct Block<T> where T: BlockchainData {
+    previous_block: BlockPointer<T>,
+    data: Vec<T>,
     key: BlockKey,
     time: CommitTime,
     nonce: i64,
     block_number: u64,
 }
 
-pub struct Blockchain {
-    last_block: BlockPointer,
+pub struct Blockchain<T> where T: BlockchainData {
+    last_block: BlockPointer<T>,
     chain_length: u64,
     validator: Box<dyn Validate>,
     criteria: Box<dyn Criteria>,
@@ -80,7 +72,7 @@ impl BlockchainError for BlockValidationError {
 }
 
 impl BlockValidationError {
-    fn new(block: &Block, error: String) -> BlockValidationError {
+    fn new<T>(block: &Block<T>, error: String)  -> BlockValidationError where T: BlockchainData {
         BlockValidationError {
             block_summary: block.get_summary(),
             message: error,
@@ -88,23 +80,12 @@ impl BlockValidationError {
     }
 }
 
-impl Transaction {
-    pub fn new(
-        source_address: Address,
-        target_address: Address,
-        message: String,
-        amount: u64,
-        time: DateTime<Utc>,
-    ) -> Transaction {
-        Transaction {
-            source_address,
-            target_address,
-            title: message,
-            amount,
-            time,
-        }
+impl ToString for Transaction {
+    fn to_string(&self) -> String {
+        self.get_summary()
     }
 }
+
 
 impl Summary<Transaction> for Transaction {
     fn get_summary(&self) -> String {
@@ -116,16 +97,10 @@ impl Summary<Transaction> for Transaction {
               Amount: {},
               Time: {}
              ]",
-            array_bytes::bytes2hex("", self.source_address),
-            array_bytes::bytes2hex("", self.target_address),
-            self.title, self.amount, self.time
+            array_bytes::bytes2hex("", self.source_address()),
+            array_bytes::bytes2hex("", self.target_address()),
+            self.title(), self.amount(), self.time()
         )
-    }
-}
-
-impl ToString for Transaction {
-    fn to_string(&self) -> String {
-        self.get_summary()
     }
 }
 
@@ -143,7 +118,6 @@ impl ToString for BlockKey {
             "{}:{}",
             array_bytes::bytes2hex("", previous_hash),
             array_bytes::bytes2hex("", self.hash)
-
         )
     }
 }
@@ -156,15 +130,15 @@ impl BlockKey {
         }
     }
 
-    fn attach_previous(&mut self, block: &Block) {
+    fn attach_previous<T>(&mut self, block: &Block<T>) where T: BlockchainData {
         self.previous_hash = block.get_key().previous_hash;
     }
 
-    fn hash_to_string(value: [u8; 64]) -> String {
+    fn hash_to_string(value: BlockHash) -> String {
         todo!()
     }
 
-    pub fn get_raw_hash(&self) -> [u8; 64] {
+    pub fn get_raw_hash(&self) -> BlockHash {
         self.hash
     }
 
@@ -173,13 +147,13 @@ impl BlockKey {
     }
 }
 
-impl Block {
+impl<T> Block<T> where T: BlockchainData {
     fn new(
-        previous_block: BlockPointer,
-        data: Vec<Transaction>,
+        previous_block: BlockPointer<T>,
+        data: Vec<T>,
         block_number: u64,
         key: BlockKey,
-    ) -> Block {
+    ) -> Block<T> {
         Block {
             previous_block,
             data,
@@ -190,7 +164,7 @@ impl Block {
         }
     }
 
-    fn submit_transactions(data: Vec<Transaction>) -> Block {
+    fn submit_transactions(data: Vec<Transaction>) -> Block<T> {
         Block::new(
             None, data, 0, BlockKey::empty(),
         )
@@ -207,7 +181,7 @@ impl Block {
         let mut hasher = Sha512::new();
         hasher.update(transaction_summary.as_bytes());
         hasher.update(&nonce.to_be_bytes());
-        let value: [u8; 64] = hasher.finalize()
+        let value: BlockHash = hasher.finalize()
             .as_slice()
             .try_into()
             .expect("Wrong output length");
@@ -228,7 +202,7 @@ impl Block {
     }
 }
 
-impl Summary<Block> for Block {
+impl<T> Summary<Block<T>> for Block<T> where T: BlockchainData {
     fn get_summary(&self) -> String {
         let mut transactions = String::new();
         self.data.iter()
@@ -245,8 +219,8 @@ impl Summary<Block> for Block {
     }
 }
 
-impl Blockchain {
-    pub fn new(validator: Box<dyn Validate>, criteria: Box<dyn Criteria>) -> Blockchain {
+impl<T> Blockchain<T> where T: BlockchainData {
+    pub fn new(validator: Box<dyn Validate>, criteria: Box<dyn Criteria>) -> Blockchain<T> {
         Blockchain {
             last_block: None,
             chain_length: 0,
@@ -255,7 +229,7 @@ impl Blockchain {
         }
     }
 
-    fn append_block(&mut self, mut block: Block) -> BlockAdditionResult {
+    fn append_block(&mut self, mut block: Block<T>) -> BlockAdditionResult {
         let block_number = self.chain_length;
         let block_hash = block.key.hash;
         block.block_number = block_number;
@@ -284,7 +258,8 @@ impl Blockchain {
         self.criteria = criteria
     }
 
-    pub fn submit(&mut self, mut block: Block) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
+    //todo adapt validation to p2p
+    pub fn submit(&mut self, mut block: Block<T>) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
         match self.validator.block_valid(&block) {
             Ok(_) => {
                 block.time = Some(Utc::now());
