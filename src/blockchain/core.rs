@@ -209,6 +209,15 @@ impl Block {
     pub fn get_key(&self) -> BlockKey {
         self.key
     }
+
+    pub fn get_transaction_for_address_in_block(&self, address: String) -> Vec<Transaction> {
+        let mut transactions = Vec::new();
+        for element in self.data.iter(){
+            if element.source_address == address || element.target_address == address { vector.push(element.clone()) }
+        }
+        return transactions;
+    }
+
 }
 
 impl Summary<Block> for Block {
@@ -275,6 +284,17 @@ impl Blockchain {
             }
             Err(error) => Err(error)
         }
+    }
+
+    pub fn get_transactions_for_address_in_blockchain(&self, &address: String) -> Vec<Transaction>{
+        let counter = self.chain_length;
+        let mut transactions = Vec::new();
+        for i in 0..counter {
+            let mut block = self.last_block.unwrap();
+            transactions.extend(block.get_transaction_for_address(address));
+            block.previous_block;
+        }
+        return transactions;
     }
 
     //todo add utility function for searching in the blockchain
