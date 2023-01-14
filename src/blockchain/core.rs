@@ -1,25 +1,37 @@
-use std::mem;
+use std::{cmp, mem};
+
 use chrono::{DateTime, Utc};
-use sha2::{Sha512, Digest};
+use serde::{ser::SerializeStruct, Serialize, Serializer};
+use sha2::{Digest, Sha512};
+
+use crate::blockchain::{self, BlockchainData, Transaction, TransactionCriteria, Wallet, WalletCriteria};
+use crate::BlockHash;
+use crate::network::communication::{BlockchainDto, BlockDto};
 
 //todo consider introducing designated types
 type CommitTime = Option<DateTime<Utc>>;
-type BlockPointer = Option<Box<Block>>;
+pub type BlockPointer<T> = Option<Box<Block<T>>>;
 
-trait Summary<T> {
-    fn get_summary(&self) -> String;
+
+pub trait Summary {
+    fn summary(&self) -> String;
 }
 
 pub trait BlockchainError {
-    fn get_message(&self) -> String;
+    fn message(&self) -> String;
 }
 
 pub trait Criteria {
     fn criteria_fulfilled(&self, hash: &[u8]) -> bool;
 }
 
-pub trait Validate {
-    fn block_valid(&self, block: &Block) -> Result<(), Box<dyn BlockchainError>>;
+pub trait Validate<T> where T: BlockchainData {
+    fn block_valid(&self, block: &BlockCandidate<T>) -> Result<(), Box<dyn BlockchainError>>;
+}
+
+pub struct TransactionCountError {
+    required_count: u64,
+    actual_count: u64,
 }
 
 pub struct BlockValidationError {
@@ -27,47 +39,48 @@ pub struct BlockValidationError {
     message: String,
 }
 
+pub struct BlockCreationError;
+
 pub struct BlockAdditionResult {
-    block_number: i64,
-    block_hash: [u8; 64],
+    block_number: u64,
+    block_hash: BlockHash,
 }
 
-pub struct Transaction {
-    source_address: String,
-    target_address: String,
-    message: String,
-    // in Kingcoin's smallest unit
-    amount: i64,
+
+#[derive(Copy, Clone, PartialEq)]
+pub struct BlockKey {
+    hash: BlockHash,
+    previous_hash: Option<BlockHash>,
+}
+
+#[derive(Serialize)]
+pub struct BlockCandidate<T> where T: BlockchainData {
+    key: BlockKey,
+    block_number: u64,
+    data: Vec<T>,
     time: DateTime<Utc>,
 }
 
-#[derive(Copy, Clone)]
-pub struct BlockKey {
-    //todo consider moving timestamp here
-    hash: [u8; 64],
-    previous_hash: Option<[u8; 64]>,
-}
-
-pub struct Block {
-    previous_block: BlockPointer,
-    data: Vec<Transaction>,
+pub struct Block<T> where T: BlockchainData {
+    previous_block: BlockPointer<T>,
+    data: Vec<T>,
     key: BlockKey,
     time: CommitTime,
-    nonce: i64,
-    block_number: i64,
+    block_number: u64,
 }
 
-pub struct Blockchain {
-    last_block: BlockPointer,
-    chain_length: i64,
-    validator: Box<dyn Validate>,
-    criteria: Box<dyn Criteria>,
+pub struct Blockchain<T> where T: BlockchainData {
+    last_block: BlockPointer<T>,
+    chain_length: u64,
+    uncommitted_data: Vec<T>,
+    data_units_per_block: u64,
+    remaining_pool: i64,
 }
 
 impl BlockchainError for BlockValidationError {
-    fn get_message(&self) -> String {
+    fn message(&self) -> String {
         format!(
-            "Block:{},
+            "Block: {},\n
              error: {}",
             self.block_summary, self.message
         )
@@ -75,170 +88,376 @@ impl BlockchainError for BlockValidationError {
 }
 
 impl BlockValidationError {
-    fn new(block: &Block, error: String) -> BlockValidationError {
+    pub(crate) fn new(block_summary: String, error: &str) -> BlockValidationError {
         BlockValidationError {
-            block_summary: block.get_summary(),
-            message: error,
+            block_summary,
+            message: error.to_string(),
         }
     }
 }
 
-impl Transaction {
-    pub fn new(
-        source_address: String,
-        target_address: String,
-        message: String,
-        amount: i64,
-        time: DateTime<Utc>,
-    ) -> Transaction {
-        Transaction {
-            source_address,
-            target_address,
-            message,
-            amount,
-            time,
+impl TransactionCountError {
+    pub fn new(required_count: u64, actual_count: u64) -> TransactionCountError {
+        TransactionCountError {
+            required_count,
+            actual_count,
         }
     }
 }
 
-impl Summary<Transaction> for Transaction {
-    fn get_summary(&self) -> String {
+impl BlockchainError for BlockCreationError {
+    fn message(&self) -> String {
+        "Only genesis block can have no ancestor".to_string()
+    }
+}
+
+impl BlockchainError for TransactionCountError {
+    fn message(&self) -> String {
         format!(
-            "[
-              Source address: {},
-              Target address: {},
-              Message: {},
-              Amount: {},
-              Time: {}
-             ]",
-            self.source_address,
-            self.target_address,
-            self.message, self.amount,
-            self.time
+            "Required transactions per block: {}, actual: {}",
+            self.required_count, self.actual_count
         )
     }
 }
 
 impl ToString for Transaction {
     fn to_string(&self) -> String {
-        self.get_summary()
+        self.summary()
     }
 }
 
-impl ToString for BlockKey {
-    fn to_string(&self) -> String {
-        todo!() // hash to string representation
+
+impl Summary for Transaction {
+    fn summary(&self) -> String {
+        serde_json::to_string(&self).unwrap()
     }
 }
 
-impl BlockKey {
-    fn empty() -> BlockKey {
+impl Default for BlockKey {
+    fn default() -> Self {
         BlockKey {
             hash: [0; 64],
             previous_hash: None,
         }
     }
+}
 
-    fn attach_previous(&mut self, block: &Block) {
-        self.previous_hash = block.get_key().previous_hash;
-    }
-
-    fn hash_to_string(value: [u8; 64]) -> String {
-        todo!()
-    }
-
-    pub fn get_raw_hash(&self) -> [u8; 64] {
-        self.hash
-    }
-
-    pub fn get_hash(&self) -> String {
-        BlockKey::hash_to_string(self.hash)
+impl ToString for BlockKey {
+    fn to_string(&self) -> String {
+        let previous_hash = match &self.previous_hash {
+            None => {
+                String::from("BEGIN")
+            }
+            Some(value) => {
+                array_bytes::bytes2hex("", value)
+            }
+        };
+        format!(
+            "{}:{}",
+            array_bytes::bytes2hex("", previous_hash),
+            array_bytes::bytes2hex("", self.hash)
+        )
     }
 }
 
-impl Block {
+impl Serialize for BlockKey {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: Serializer {
+        let mut state = serializer.serialize_struct("BlockKey", 2)?;
+        let hash = array_bytes::bytes2hex("", self.hash);
+        let previous_hash = match &self.previous_hash {
+            None => None,
+            Some(hash) => {
+                Some(array_bytes::bytes2hex("", hash))
+            }
+        };
+        state.serialize_field("hash", &hash)?;
+        state.serialize_field("previous_hash", &previous_hash)?;
+        state.end()
+    }
+}
+
+impl BlockKey {
+    fn parse_from_dto<T>(block_dto: &mut BlockDto<T>) -> BlockKey where T: BlockchainData {
+        BlockKey {
+            hash: array_bytes::hex2array(block_dto.take_block_hash()).unwrap(),
+            previous_hash: match block_dto.take_previous_block_hash() {
+                None => None,
+                Some(previous_hash) => Some(array_bytes::hex2array(previous_hash).unwrap())
+            },
+        }
+    }
+
+    fn hash_to_string(value: BlockHash) -> String {
+        array_bytes::bytes2hex("", value)
+    }
+
+    pub fn raw_hash(&self) -> BlockHash {
+        self.hash
+    }
+
+    pub fn hash(&self) -> String {
+        BlockKey::hash_to_string(self.hash)
+    }
+
+    pub fn previous_hash(&self) -> Option<String> {
+        match self.previous_hash {
+            None => None,
+            Some(hash) => Some(array_bytes::bytes2hex("", hash))
+        }
+    }
+}
+
+impl<T> BlockCandidate<T> where T: BlockchainData {
+    pub fn take_data(&mut self) -> Vec<T> {
+        mem::take(&mut self.data)
+    }
+
+    pub fn take_time(&mut self) -> DateTime<Utc> {
+        mem::take(&mut self.time)
+    }
+
+    pub fn block_number(&mut self) -> u64 {
+        self.block_number
+    }
+
+    pub fn key(&self) -> BlockKey {
+        self.key
+    }
+    pub fn data(&self) -> &Vec<T> {
+        &self.data
+    }
+    pub fn time(&self) -> DateTime<Utc> {
+        self.time
+    }
+
+    pub fn create_new(
+        data: Vec<T>, previous_block: &BlockPointer<T>,
+    ) -> Result<BlockCandidate<T>, Box<dyn BlockchainError>> {
+        match previous_block {
+            None => Err(
+                Box::new(
+                    BlockCreationError
+                )),
+            Some(previous_block) => {
+                let key = BlockCandidate::<T>::hash(
+                    previous_block.key, BlockCandidate::summarize(&data),
+                );
+                Ok(BlockCandidate {
+                    key,
+                    block_number: previous_block.block_number + 1,
+                    data,
+                    time: Utc::now(),
+                })
+            }
+        }
+    }
+
+    pub fn summarize(data: &[T]) -> String where T: BlockchainData {
+        data.iter()
+            .map(|data| data.summary())
+            .collect::<String>()
+    }
+
+    pub fn hash(previous_key: BlockKey, data_summary: String) -> BlockKey {
+        match previous_key.previous_hash {
+            None => BlockKey::default(),
+            Some(matched) => {
+                let mut hasher = Sha512::new();
+                hasher.update(matched);
+                hasher.update(data_summary.as_bytes());
+                let hash: BlockHash = hasher.finalize()
+                    .as_slice()
+                    .try_into()
+                    .expect("Wrong output length");
+                BlockKey {
+                    hash,
+                    previous_hash: Some(matched),
+                }
+            }
+        }
+    }
+}
+
+impl<T> Block<T> where T: BlockchainData + Summary {
     fn new(
-        previous_block: BlockPointer,
-        data: Vec<Transaction>,
-        block_number: i64,
+        previous_block: BlockPointer<T>,
+        data: Vec<T>,
+        block_number: u64,
         key: BlockKey,
-    ) -> Block {
+    ) -> Block<T> {
         Block {
             previous_block,
             data,
             key,
             time: None,
-            nonce: 0,
             block_number,
         }
     }
 
-    fn submit_transactions(data: Vec<Transaction>) -> Block {
-        Block::new(
-            None, data, -1, BlockKey::empty(),
-        )
-    }
-
-    fn summarize_transactions(transactions: &Vec<Transaction>) -> String {
-        transactions.iter()
-            .map(|transaction| transaction.get_summary())
-            .map(|summary| summary + ",\n")
-            .collect::<String>()
-    }
-
-    fn hash(transaction_summary: String, nonce: i64) -> BlockKey {
-        let mut hasher = Sha512::new();
-        hasher.update(transaction_summary.as_bytes());
-        hasher.update(&nonce.to_be_bytes());
-        let value: [u8; 64] = hasher.finalize()
-            .as_slice()
-            .try_into()
-            .expect("Wrong output length");
-        BlockKey {
-            hash: value,
-            previous_hash: None,
-        }
-    }
-
-    pub fn hash_block(&mut self, nonce: i64) {
-        let transaction_summary = Block::summarize_transactions(&self.data);
-        self.key = Block::hash(transaction_summary, nonce);
-        self.nonce = nonce;
-    }
-
-    pub fn get_key(&self) -> BlockKey {
+    pub fn key(&self) -> BlockKey {
         self.key
+    }
+
+    pub fn previous_block(&self) -> &BlockPointer<T> {
+        &self.previous_block
+    }
+
+    pub fn data(&self) -> &Vec<T> {
+        &self.data
+    }
+
+    pub fn time(&self) -> CommitTime {
+        self.time
+    }
+
+    pub fn block_number(&self) -> u64 {
+        self.block_number
     }
 }
 
-impl Summary<Block> for Block {
-    fn get_summary(&self) -> String {
+impl<T> From<BlockDto<T>> for BlockCandidate<T> where T: BlockchainData {
+    fn from(mut dto: BlockDto<T>) -> Self {
+        Self {
+            data: dto.take_data(),
+            key: BlockKey::parse_from_dto(&mut dto),
+            time: dto.take_time(),
+            block_number: dto.block_number(),
+        }
+    }
+}
+
+impl<T> From<BlockCandidate<T>> for Block<T> where T: BlockchainData {
+    fn from(mut block_candidate: BlockCandidate<T>) -> Self {
+        Self {
+            previous_block: None,
+            data: block_candidate.take_data(),
+            key: block_candidate.key(),
+            time: Some(block_candidate.take_time()),
+            block_number: block_candidate.block_number(),
+        }
+    }
+}
+
+impl<T> From<BlockchainDto<T>> for Blockchain<T> where T: BlockchainData {
+    fn from(mut dto: BlockchainDto<T>) -> Self {
+        let last_block = {
+            let mut last_block = None;
+            let block_dtos = dto.take_blocks();
+            for mut block_dto in block_dtos {
+                let block = Block {
+                    previous_block: last_block,
+                    data: block_dto.take_data(),
+                    key: BlockKey::parse_from_dto(&mut block_dto),
+                    time: Some(block_dto.take_time()),
+                    block_number: block_dto.block_number(),
+                };
+                last_block = Some(Box::new(block));
+            }
+            last_block
+        };
+        Self {
+            last_block,
+            chain_length: dto.chain_length(),
+            uncommitted_data: dto.take_uncommitted_data(),
+            data_units_per_block: dto.max_data_units_per_block(),
+            remaining_pool: dto.remaining_pool(),
+        }
+    }
+}
+
+impl<T> Summary for BlockCandidate<T> where T: BlockchainData {
+    fn summary(&self) -> String {
         let mut transactions = String::new();
         self.data.iter()
-            .map(|transaction| transaction.get_summary())
+            .map(|data| data.summary())
             .map(|summary| summary + ",\n")
             .for_each(|summary| transactions.push_str(&summary));
         format!(
             "Timestamp: {},
              Transaction summary: {},
              {}",
-            self.time.unwrap(), transactions,
-            self.get_key().to_string()
+            self.time, transactions,
+            self.key().to_string()
         )
     }
 }
 
-impl Blockchain {
-    pub fn new(validator: Box<dyn Validate>, criteria: Box<dyn Criteria>) -> Blockchain {
+impl<T> Blockchain<T> where T: BlockchainData {
+    fn new(genesis_block: Block<T>, remaining_pool: i64) -> Blockchain<T> {
         Blockchain {
-            last_block: None,
+            last_block: Some(Box::new(genesis_block)),
             chain_length: 0,
-            validator,
-            criteria,
+            uncommitted_data: vec![],
+            data_units_per_block: 30,
+            remaining_pool,
         }
     }
 
-    fn append_block(&mut self, mut block: Block) -> BlockAdditionResult {
+    pub fn transaction_chain(genesis_transactions: Vec<Transaction>) -> Blockchain<Transaction> {
+        let to_mint: i64 = genesis_transactions.iter()
+            .filter(|transaction| transaction.source_address == blockchain::MINTING_WALLET_ADDRESS)
+            .map(|transaction| transaction.amount)
+            .sum();
+
+        let genesis_block = Block::new(
+            None, genesis_transactions, 0, BlockKey::default(),
+        );
+
+        let mut blockchain = Blockchain::new(genesis_block, 21000000);
+        blockchain.mint(to_mint);
+        blockchain
+    }
+
+    pub fn wallet_chain() -> Blockchain<Wallet> {
+        let genesis_block = Block::new(
+            None, vec![
+                Wallet {
+                    address: blockchain::MINTING_WALLET_ADDRESS,
+                    public_key: None,
+                },
+            ], 0, BlockKey::default(),
+        );
+        Blockchain::new(genesis_block, 0)
+    }
+
+    pub fn last_block(&self) -> &BlockPointer<T> {
+        &self.last_block
+    }
+
+    pub fn chain_length(&self) -> u64 {
+        self.chain_length
+    }
+
+    pub fn data_units_per_block(&self) -> u64 {
+        self.data_units_per_block
+    }
+
+    pub fn uncommitted_data(&self) -> &[T] {
+        &self.uncommitted_data[..]
+    }
+
+    fn remove_uncommitted_data(&mut self) {
+        self.uncommitted_data.drain(..self.data_units_per_block as usize).count();
+    }
+
+    pub fn add_uncommitted(&mut self, data: T) {
+        self.uncommitted_data.push(data);
+    }
+
+    pub fn mint(&mut self, amount: i64) -> i64 {
+        if amount <= self.remaining_pool {
+            self.remaining_pool -= amount;
+            self.remaining_pool
+        } else {
+            0
+        }
+    }
+
+    pub fn remaining_pool(&self) -> i64 {
+        self.remaining_pool
+    }
+
+    fn append_block(&mut self, mut block: Block<T>) -> BlockAdditionResult {
         let block_number = self.chain_length;
         let block_hash = block.key.hash;
         block.block_number = block_number;
@@ -248,7 +467,6 @@ impl Blockchain {
             }
             Some(tail) => {
                 let old_tail = mem::replace(tail, Box::new(block));
-                tail.key.attach_previous(&old_tail);
                 tail.previous_block = Some(old_tail);
             }
         }
@@ -259,23 +477,11 @@ impl Blockchain {
         }
     }
 
-    pub fn get_criteria(&self) -> &dyn Criteria {
-        &*self.criteria
+    pub fn submit_new_block(
+        &mut self, block_candidate: BlockCandidate<T>,
+    ) -> BlockAdditionResult {
+        let block = Block::from(block_candidate);
+        self.remove_uncommitted_data();
+        self.append_block(block)
     }
-
-    pub fn update_criteria(&mut self, criteria: Box<dyn Criteria>) {
-        self.criteria = criteria
-    }
-
-    pub fn submit(&mut self, mut block: Block) -> Result<BlockAdditionResult, Box<dyn BlockchainError>> {
-        match self.validator.block_valid(&block) {
-            Ok(_) => {
-                block.time = Some(Utc::now());
-                Ok(self.append_block(block))
-            }
-            Err(error) => Err(error)
-        }
-    }
-
-    //todo add utility function for searching in the blockchain
 }
