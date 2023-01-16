@@ -68,7 +68,9 @@ fn dispatch_blockchain_event(
         }
         BlockchainMessage::SubmitBlock { block_dto } => {
             let block_candidate = BlockCandidate::from(block_dto);
-            let transaction_validator = TransactionValidator::new(&wallets, &transactions);
+            let transaction_validator = TransactionValidator::new(
+                &wallets, &stakes, &transactions,
+            );
             let block_valid = match transaction_validator.block_valid(&block_candidate) {
                 Ok(_) => true,
                 Err(error) => {
@@ -88,7 +90,7 @@ fn dispatch_blockchain_event(
         BlockchainMessage::Bid(stake_bid) => on_stake_raised(
             swarm, transactions, sending_peer, node_state, stakes, stake_bid,
         ),
-        BlockchainMessage::Sync { .. } => {todo!()}
+        BlockchainMessage::Sync { .. } => { todo!() }
     }
 }
 

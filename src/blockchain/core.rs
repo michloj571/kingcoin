@@ -1,14 +1,13 @@
-use std::{cmp, mem};
+use std::mem;
 
 use chrono::{DateTime, Utc};
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use sha2::{Digest, Sha512};
 
-use crate::blockchain::{self, BlockchainData, Transaction, TransactionCriteria, Wallet, WalletCriteria};
+use crate::blockchain::{self, BlockchainData, Transaction, Wallet, WalletCriteria};
 use crate::BlockHash;
 use crate::network::communication::{BlockchainDto, BlockDto};
 
-//todo consider introducing designated types
 type CommitTime = Option<DateTime<Utc>>;
 pub type BlockPointer<T> = Option<Box<Block<T>>>;
 
@@ -388,7 +387,7 @@ impl<T> Blockchain<T> where T: BlockchainData {
             last_block: Some(Box::new(genesis_block)),
             chain_length: 0,
             uncommitted_data: vec![],
-            data_units_per_block: 30,
+            data_units_per_block: 2 * blockchain::TRANSACTIONS_PER_BLOCK,
             remaining_pool,
         }
     }
@@ -415,6 +414,10 @@ impl<T> Blockchain<T> where T: BlockchainData {
                     address: blockchain::MINTING_WALLET_ADDRESS,
                     public_key: None,
                 },
+                Wallet {
+                    address: *blockchain::STAKE_WALLET_ADDRESS,
+                    public_key: None
+                }
             ], 0, BlockKey::default(),
         );
         Blockchain::new(genesis_block, 0)

@@ -7,21 +7,25 @@ use rsa::signature::RandomizedSigner;
 use serde::{Deserialize, Serialize};
 use sha2::Sha512;
 
-use crate::blockchain::core::{
-    BlockCandidate, Blockchain, BlockchainError, BlockValidationError,
-    Criteria, Summary, Validate,
-};
+use crate::blockchain::core::{BlockCandidate, Blockchain, BlockchainError, BlockPointer, BlockValidationError, Criteria, Summary, Validate};
 
 pub mod core;
 
 pub type Address = [u8; 32];
 
 pub static TRANSACTION_FEE: i64 = 50;
+pub static TRANSACTIONS_PER_BLOCK: u64 = 5;
+pub static TOTAL_TRANSFERS_PER_BLOCK: u64 = 12;
 pub static MINTING_WALLET_ADDRESS: Address = [0; 32];
 lazy_static! {
     pub static ref STAKE_WALLET_ADDRESS: Address = {
         let mut address = [0;32];
         address[0] = 1;
+        address
+    };
+    pub static ref REWARD_WALLET_ADDRESS: Address = {
+        let mut address = [0;32];
+        address[0] = 2;
         address
     };
 }
@@ -150,57 +154,44 @@ impl BlockchainData for Transaction {}
 pub struct TransactionValidator<'a> {
     wallets: &'a Blockchain<Wallet>,
     transactions: &'a Blockchain<Transaction>,
+    stakes: &'a Blockchain<Transaction>,
 }
 
 impl<'a> Validate<Transaction> for TransactionValidator<'a> {
     fn block_valid(&self, block: &BlockCandidate<Transaction>) -> Result<(), Box<dyn BlockchainError>> {
-        let mut total_reward = 0;
-
-        self.validate_hash(block)?;
-
-        for transaction in block.data() {
-            if transaction.source_address() != MINTING_WALLET_ADDRESS {
-                let signature = match transaction.sender_signature() {
-                    None => {
-                        return Err(
-                            Box::new(TransactionValidationError)
-                        );
-                    }
-                    Some(signature) => signature
-                };
-                if transaction.source_address() == transaction.target_address() {
-                    return Err(
-                        Box::new(TransactionValidationError)
-                    );
-                }
-                self.validate_transfer(transaction, &signature)?;
-            } else {
-                total_reward += transaction.amount;
-            }
-        }
-
-        if total_reward == TRANSACTION_FEE {
-            Ok(())
+        if block.data().len() == TOTAL_TRANSFERS_PER_BLOCK as usize {
+            self.validate_hash(block)?;
+            self.validate_stake_return(block)?;
+            self.validate_reward_transfer(block)?;
+            self.validate_transactions(block)
         } else {
-            Err(Box::new(
-                BlockValidationError::new(
-                    serde_json::to_string_pretty(block).unwrap(),
-                    "Invalid reward",
-                )
-            ))
+            Err(
+                Box::new(TransactionValidationError)
+            )
         }
     }
 }
 
 impl<'a> TransactionValidator<'a> {
-    pub fn new(wallets: &'a Blockchain<Wallet>, transactions: &'a Blockchain<Transaction>) -> TransactionValidator<'a> {
+    pub fn new(
+        wallets: &'a Blockchain<Wallet>,
+        stakes: &'a Blockchain<Transaction>,
+        transactions: &'a Blockchain<Transaction>,
+    ) -> TransactionValidator<'a> {
         Self {
             wallets,
+            stakes,
             transactions,
         }
     }
     pub fn wallets(&self) -> &Blockchain<Wallet> {
         &self.wallets
+    }
+
+    fn is_not_special(transaction: &Transaction) -> bool {
+        transaction.source_address() != *REWARD_WALLET_ADDRESS &&
+            transaction.source_address() != *STAKE_WALLET_ADDRESS &&
+            transaction.target_address() != *REWARD_WALLET_ADDRESS
     }
 
     fn validate_hash(
@@ -225,9 +216,29 @@ impl<'a> TransactionValidator<'a> {
         }
     }
 
-    fn validate_transfer(
-        &self, transaction: &Transaction, signature: &str,
+    fn validate_transactions(&self, block: &BlockCandidate<Transaction>) -> Result<(), Box<dyn BlockchainError>> {
+        block.data()
+            .iter()
+            .filter(|transaction| TransactionValidator::is_not_special(transaction))
+            .try_for_each(|transaction| self.validate_transaction(transaction))
+    }
+
+    fn validate_transaction(
+        &self, transaction: &Transaction,
     ) -> Result<(), Box<dyn BlockchainError>> {
+        if transaction.source_address() == transaction.target_address() {
+            return Err(
+                Box::new(TransactionValidationError)
+            );
+        }
+
+        let signature = match transaction.sender_signature() {
+            None => return Err(
+                Box::new(TransactionValidationError)
+            ),
+            Some(signature) => signature
+        };
+
         let source_wallet = find_wallet_by_address(
             transaction.source_address(), &self.wallets,
         );
@@ -240,27 +251,80 @@ impl<'a> TransactionValidator<'a> {
         };
 
         match source_wallet {
-            None => return Err(
+            None => Err(
                 Box::new(TransactionValidationError)
             ),
             Some(wallet) => {
-                let available_balance = wallet.balance(self.transactions);
-                let public_key = wallet.key()
-                    .clone()
-                    .unwrap();
-                let key: VerifyingKey<Sha512> = VerifyingKey::from(public_key);
-                let verified = key.verify(
-                    transaction.signed_content().as_bytes(),
-                    &Signature::from_bytes(signature.as_bytes()).unwrap())
-                    .is_err();
-                if !verified || available_balance < transaction.amount {
-                    return Err(
-                        Box::new(TransactionValidationError)
-                    );
-                } else {
+                self.validate_transfer(transaction, signature, wallet)
+            }
+        }
+    }
+
+    fn validate_stake_return(&self, block: &BlockCandidate<Transaction>) -> Result<(), Box<dyn BlockchainError>> {
+        match self.stakes.last_block() {
+            None => Err(
+                Box::new(TransactionValidationError)
+            ),
+            Some(block) => {
+                let stake_bid = &block.data()[0];
+                let stake_returns = block.data()
+                    .iter()
+                    .filter(|transaction| transaction.source_address() == *STAKE_WALLET_ADDRESS)
+                    .filter(|transaction| transaction.target_address() == stake_bid.source_address())
+                    .filter(|transaction| transaction.amount() == stake_bid.amount())
+                    .count();
+                if stake_returns == 1 {
                     Ok(())
+                } else {
+                    Err(
+                        Box::new(TransactionValidationError)
+                    )
                 }
             }
+        }
+    }
+
+    fn validate_reward_transfer(&self, block: &BlockCandidate<Transaction>) -> Result<(), Box<dyn BlockchainError>> {
+        match self.stakes.last_block() {
+            None => Err(
+                Box::new(TransactionValidationError)
+            ),
+            Some(stakes_block) => {
+                let total_fee: i64 = block.data()
+                    .iter()
+                    .filter(|transaction| transaction.target_address() == *REWARD_WALLET_ADDRESS)
+                    .filter(|transaction| transaction.amount() == TRANSACTION_FEE)
+                    .map(|transaction| transaction.amount())
+                    .sum();
+                let expected_reward = TRANSACTION_FEE * TRANSACTIONS_PER_BLOCK as i64;
+                let reward: i64 = block.data()
+                    .iter()
+                    .filter(|transaction| transaction.source_address() == *REWARD_WALLET_ADDRESS)
+                    .filter(|transaction| transaction.target_address() == stakes_block.data()[0].source_address())
+                    .map(|transaction| transaction.amount())
+                    .sum();
+                if reward == total_fee && total_fee == expected_reward {
+                    Ok(())
+                } else {
+                    Err(
+                        Box::new(TransactionValidationError)
+                    )
+                }
+            }
+        }
+    }
+
+    fn validate_transfer(&self, transaction: &Transaction, signature: &str, source_wallet: Wallet) -> Result<(), Box<dyn BlockchainError>> {
+        let available_balance = source_wallet.balance(
+            self.transactions, self.stakes,
+        );
+        let verified = source_wallet.is_signature_valid(transaction, signature);
+        if !verified || available_balance < transaction.amount {
+            Err(
+                Box::new(TransactionValidationError)
+            )
+        } else {
+            Ok(())
         }
     }
 }
@@ -282,7 +346,7 @@ impl Criteria for BlockCriteria {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct Wallet {
     address: [u8; 32],
     public_key: Option<RsaPublicKey>,
@@ -318,14 +382,34 @@ impl Wallet {
         &self.public_key
     }
 
+    pub fn is_signature_valid(&self, transaction: &Transaction, signature: &str) -> bool {
+        let public_key = self.key()
+            .clone()
+            .unwrap();
+        let key: VerifyingKey<Sha512> = VerifyingKey::from(public_key);
+        let verified = key.verify(
+            transaction.signed_content().as_bytes(),
+            &Signature::from_bytes(signature.as_bytes()).unwrap())
+            .is_err();
+        verified
+    }
+
     pub fn balance(
         &self, transaction_chain: &Blockchain<Transaction>,
+        stakes_chain: &Blockchain<Transaction>,
     ) -> i64 {
         if self.address == MINTING_WALLET_ADDRESS {
             return transaction_chain.remaining_pool();
         }
-        let mut current_block = transaction_chain.last_block();
+        let mut balance = self.balance_chain(transaction_chain);
+        balance += self.balance_pool(transaction_chain.uncommitted_data());
+        balance += self.balance_chain(stakes_chain);
+        balance
+    }
+
+    fn balance_chain(&self, blockchain: &Blockchain<Transaction>) -> i64 {
         let mut balance: i64 = 0;
+        let mut current_block = blockchain.last_block();
         loop {
             match current_block {
                 None => break,
@@ -335,7 +419,6 @@ impl Wallet {
                 }
             }
         }
-        balance += self.balance_pool(transaction_chain.uncommitted_data());
         balance
     }
 
@@ -402,8 +485,6 @@ fn extract_wallet(data: &Vec<Wallet>, address: Address) -> Option<Wallet> {
 }
 
 mod test {
-    use std::cell::RefCell;
-
     use chrono::Utc;
     use rsa::{RsaPrivateKey, RsaPublicKey};
     use rsa::pss::BlindedSigningKey;

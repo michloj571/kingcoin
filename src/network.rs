@@ -6,8 +6,8 @@ use lazy_static::lazy_static;
 use libp2p::{core::upgrade, gossipsub, identity::Keypair, mdns::{Event, tokio::Behaviour as TokioBehaviour}, mdns, mplex, noise, PeerId, Swarm, swarm::NetworkBehaviour, tcp::{Config, tokio::Transport as TokioTransport}, Transport};
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, IdentTopic, MessageAuthenticity, ValidationMode};
 
-use crate::blockchain::{StakeBid, Transaction};
-use crate::blockchain::core::{BlockCandidate, BlockchainError};
+use crate::blockchain::{StakeBid, Transaction, Wallet};
+use crate::blockchain::core::{BlockCandidate, Blockchain};
 use crate::network::communication::{Vote, VotingResult};
 
 pub mod communication;
@@ -18,6 +18,7 @@ lazy_static! {
 
 pub struct NodeState {
     node_id: PeerId,
+    user_wallet: Wallet,
     node_bid: StakeBid,
     peers_bids: HashMap<PeerId, StakeBid>,
     block_creator: Option<PeerId>,
@@ -28,10 +29,17 @@ pub struct NodeState {
 
 
 impl NodeState {
-    pub fn init(node_id: PeerId, initial_bid: StakeBid) -> NodeState {
+    pub fn init(
+        node_id: PeerId, user_wallet: Wallet,
+        transactions: &Blockchain<Transaction>,
+        stakes: &Blockchain<Transaction>
+    ) -> NodeState {
+        let bid = user_wallet.balance(transactions, stakes) * 75 / 100;
+        let wallet_address = user_wallet.address();
         NodeState {
             node_id,
-            node_bid: initial_bid,
+            user_wallet,
+            node_bid: StakeBid::bid(bid, wallet_address),
             peers_bids: HashMap::new(),
             block_creator: None,
             bad_peers: HashSet::new(),
@@ -56,8 +64,8 @@ impl NodeState {
         &self.bad_peers
     }
 
-    pub fn set_block_creator(&mut self, peer_id: PeerId) {
-        self.block_creator = Some(peer_id);
+    pub fn set_block_creator(&mut self, id: PeerId) {
+        self.block_creator = Some(id);
     }
 
     pub fn set_pending_block(&mut self, pending_block: BlockCandidate<Transaction>) {
@@ -77,10 +85,10 @@ impl NodeState {
     }
 
     pub fn mark_creator_bad(&mut self) -> Result<(), ()> {
-        match self.block_creator {
+        match &self.block_creator {
             None => Err(()),
             Some(creator) => {
-                self.bad_peers.insert(creator);
+                self.bad_peers.insert(creator.clone());
                 Ok(())
             }
         }
