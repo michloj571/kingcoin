@@ -2,6 +2,7 @@ use std::error::Error;
 
 use io::BufReader;
 use libp2p::{futures::StreamExt, Swarm};
+use rsa::{RsaPrivateKey, RsaPublicKey};
 use tokio::io::{self, AsyncBufReadExt};
 
 use kingcoin::{
@@ -54,6 +55,8 @@ fn initialize_node(
     let mut transactions = Blockchain::<Transaction>::transaction_chain(
         vec![]
     );
+    let private_key = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+    let wallet = Wallet::new([5;32], Some(RsaPublicKey::from(&private_key)));
     let mut node_state = NodeState::init(
         swarm.local_peer_id().clone(), wallet, &transactions, &stakes
     );

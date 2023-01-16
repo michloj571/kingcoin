@@ -18,7 +18,7 @@ pub fn dispatch_network_event<H>(
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossipsub(
                                   GossipsubEvent::Message {
                                       propagation_source: peer_id,
-                                      message_id: id,
+                                      message_id: _id,
                                       message,
                                   })
         ) => {
@@ -64,26 +64,14 @@ fn dispatch_blockchain_event(
 ) {
     match message {
         BlockchainMessage::SubmitTransaction(transaction) => {
-            transactions.add_uncommitted(transaction)
+            transactions.add_uncommitted(transaction);
+            if transactions.has_enough_uncommitted_data() && node_state.should_create_block() {
+
+            }
         }
-        BlockchainMessage::SubmitBlock { block_dto } => {
-            let block_candidate = BlockCandidate::from(block_dto);
-            let transaction_validator = TransactionValidator::new(
-                &wallets, &stakes, &transactions,
-            );
-            let block_valid = match transaction_validator.block_valid(&block_candidate) {
-                Ok(_) => true,
-                Err(error) => {
-                    println!("{}", error.message());
-                    false
-                }
-            };
-            node_state.set_pending_block(block_candidate);
-            let vote = BlockchainMessage::Vote {
-                block_valid
-            };
-            communication::publish_message(swarm, vote);
-        }
+        BlockchainMessage::SubmitBlock { block_dto } => on_submit_block(
+            swarm, transactions, wallets, node_state, stakes, block_dto
+        ),
         BlockchainMessage::Vote { block_valid } => on_vote_received(
             swarm, transactions, sending_peer, node_state, block_valid,
         ),
@@ -92,6 +80,32 @@ fn dispatch_blockchain_event(
         ),
         BlockchainMessage::Sync { .. } => { todo!() }
     }
+}
+
+fn on_submit_block(
+    swarm: &mut Swarm<BlockchainBehaviour>,
+    transactions: &mut Blockchain<Transaction>,
+    wallets: &mut Blockchain<Wallet>,
+    node_state: &mut NodeState,
+    stakes: &mut Blockchain<Transaction>,
+    block_dto: BlockDto<Transaction>
+) {
+    let block_candidate = BlockCandidate::from(block_dto);
+    let transaction_validator = TransactionValidator::new(
+        &wallets, &stakes, &transactions,
+    );
+    let block_valid = match transaction_validator.block_valid(&block_candidate) {
+        Ok(_) => true,
+        Err(error) => {
+            println!("{}", error.message());
+            false
+        }
+    };
+    node_state.set_pending_block(block_candidate);
+    let vote = BlockchainMessage::Vote {
+        block_valid
+    };
+    communication::publish_message(swarm, vote);
 }
 
 fn on_stake_raised(
@@ -112,8 +126,8 @@ fn on_stake_raised(
         };
 
         stakes.submit_new_block(stakes_block);
-
-        if winner.eq(&node_state.node_id) {
+        node_state.set_block_creator(winner.clone());
+        if node_state.should_create_block() {
             match try_forge_block(transactions) {
                 Ok(block_candidate) => {
                     communication::publish_message(
@@ -126,7 +140,6 @@ fn on_stake_raised(
                 Err(error) => println!("{}", error.message())
             }
         }
-        node_state.set_block_creator(winner.clone());
         node_state.reset_peer_bids();
     }
 }

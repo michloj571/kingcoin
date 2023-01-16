@@ -443,23 +443,6 @@ impl<T> Blockchain<T> where T: BlockchainData {
         self.uncommitted_data.drain(..self.data_units_per_block as usize).count();
     }
 
-    pub fn add_uncommitted(&mut self, data: T) {
-        self.uncommitted_data.push(data);
-    }
-
-    pub fn mint(&mut self, amount: i64) -> i64 {
-        if amount <= self.remaining_pool {
-            self.remaining_pool -= amount;
-            self.remaining_pool
-        } else {
-            0
-        }
-    }
-
-    pub fn remaining_pool(&self) -> i64 {
-        self.remaining_pool
-    }
-
     fn append_block(&mut self, mut block: Block<T>) -> BlockAdditionResult {
         let block_number = self.chain_length;
         let block_hash = block.key.hash;
@@ -478,6 +461,27 @@ impl<T> Blockchain<T> where T: BlockchainData {
             block_number,
             block_hash,
         }
+    }
+
+    pub fn add_uncommitted(&mut self, data: T) {
+        self.uncommitted_data.push(data);
+    }
+
+    pub fn mint(&mut self, amount: i64) -> i64 {
+        if amount <= self.remaining_pool {
+            self.remaining_pool -= amount;
+            self.remaining_pool
+        } else {
+            0
+        }
+    }
+
+    pub fn remaining_pool(&self) -> i64 {
+        self.remaining_pool
+    }
+    
+    pub fn has_enough_uncommitted_data(&self) -> bool {
+        self.uncommitted_data.len() == self.data_units_per_block as usize
     }
 
     pub fn submit_new_block(

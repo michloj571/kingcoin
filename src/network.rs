@@ -32,7 +32,7 @@ impl NodeState {
     pub fn init(
         node_id: PeerId, user_wallet: Wallet,
         transactions: &Blockchain<Transaction>,
-        stakes: &Blockchain<Transaction>
+        stakes: &Blockchain<Transaction>,
     ) -> NodeState {
         let bid = user_wallet.balance(transactions, stakes) * 75 / 100;
         let wallet_address = user_wallet.address();
@@ -62,6 +62,13 @@ impl NodeState {
 
     pub fn bad_peers(&self) -> &HashSet<PeerId> {
         &self.bad_peers
+    }
+
+    pub fn should_create_block(&self) -> bool {
+        match self.block_creator {
+            None => false,
+            Some(peer_id) => self.node_id == peer_id
+        }
     }
 
     pub fn set_block_creator(&mut self, id: PeerId) {
