@@ -1,13 +1,13 @@
 use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
-use rsa::{pss::VerifyingKey, RsaPublicKey, signature::{Signature, Verifier}};
+use rsa::{pss::VerifyingKey, RsaPrivateKey, RsaPublicKey, signature::{Signature, Verifier}};
 use rsa::pss::BlindedSigningKey;
 use rsa::rand_core::{CryptoRng, RngCore};
 use rsa::signature::RandomizedSigner;
 use serde::{Deserialize, Serialize};
-use sha2::Sha512;
+use sha2::{Digest, Sha256, Sha512};
 
-use crate::blockchain::core::{BlockCandidate, Blockchain, BlockchainError, BlockPointer, BlockValidationError, Criteria, Summary, Validate};
+use crate::blockchain::core::{BlockCandidate, Blockchain, BlockchainError, BlockValidationError, Criteria, Summary, Validate};
 
 pub mod core;
 
@@ -111,9 +111,16 @@ impl Transaction {
             bid, Utc::now(),
         )
     }
+
+    pub fn forging_reward(target_address: Address) -> Transaction {
+        Transaction::new(
+            *REWARD_WALLET_ADDRESS, target_address, "".to_string(),
+            TRANSACTION_FEE * TRANSACTIONS_PER_BLOCK as i64, Utc::now(),
+        )
+    }
 }
 
-#[derive(PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Hash, Serialize, Deserialize, Clone)]
 pub struct StakeBid {
     stake: i64,
     transaction: Transaction,
@@ -223,7 +230,7 @@ impl<'a> TransactionValidator<'a> {
             .try_for_each(|transaction| self.validate_transaction(transaction))
     }
 
-    fn validate_transaction(
+    pub fn validate_transaction(
         &self, transaction: &Transaction,
     ) -> Result<(), Box<dyn BlockchainError>> {
         if transaction.source_address() == transaction.target_address() {
@@ -352,6 +359,49 @@ pub struct Wallet {
     public_key: Option<RsaPublicKey>,
 }
 
+
+#[derive(Serialize, Deserialize)]
+pub struct HotWallet {
+    address: Address,
+    private_key: RsaPrivateKey,
+}
+
+impl HotWallet {
+    fn new(address: Address, private_key: RsaPrivateKey) -> HotWallet {
+        HotWallet {
+            address,
+            private_key,
+        }
+    }
+
+    pub fn generate(private_key: RsaPrivateKey) -> HotWallet {
+        let mut hasher = Sha256::new();
+        hasher.update(Utc::now().to_string());
+        let wallet_address: Address = hasher.finalize()
+            .try_into()
+            .expect("Error creating wallet");
+
+        HotWallet::new(
+            wallet_address, private_key,
+        )
+    }
+
+    pub fn to_wallet(&self) -> Wallet {
+        let public_key = RsaPublicKey::from(&self.private_key);
+        Wallet::new(
+            self.address, Some(public_key),
+        )
+    }
+
+    pub fn address(&self) -> Address {
+        self.address
+    }
+
+    pub fn private_key(&self) -> &RsaPrivateKey {
+        &self.private_key
+    }
+}
+
 pub struct WalletCriteria;
 
 impl Criteria for WalletCriteria {
@@ -369,7 +419,7 @@ impl Validate<Wallet> for WalletValidator {
 }
 
 impl Wallet {
-    pub fn new(address: Address, public_key: Option<RsaPublicKey>) -> Wallet {
+    fn new(address: Address, public_key: Option<RsaPublicKey>) -> Wallet {
         Wallet {
             address,
             public_key,
@@ -383,16 +433,19 @@ impl Wallet {
     }
 
     pub fn is_signature_valid(&self, transaction: &Transaction, signature: &str) -> bool {
-        let public_key = self.key()
-            .clone()
-            .unwrap();
+        let public_key = match self.key() {
+            None => return false,
+            Some(key) => key.clone(),
+        };
         let key: VerifyingKey<Sha512> = VerifyingKey::from(public_key);
         let verified = key.verify(
             transaction.signed_content().as_bytes(),
             &Signature::from_bytes(signature.as_bytes()).unwrap())
             .is_err();
+
         verified
     }
+
 
     pub fn balance(
         &self, transaction_chain: &Blockchain<Transaction>,

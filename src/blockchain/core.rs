@@ -265,7 +265,6 @@ impl<T> BlockCandidate<T> where T: BlockchainData {
                 hasher.update(matched);
                 hasher.update(data_summary.as_bytes());
                 let hash: BlockHash = hasher.finalize()
-                    .as_slice()
                     .try_into()
                     .expect("Wrong output length");
                 BlockKey {
@@ -382,12 +381,12 @@ impl<T> Summary for BlockCandidate<T> where T: BlockchainData {
 }
 
 impl<T> Blockchain<T> where T: BlockchainData {
-    fn new(genesis_block: Block<T>, remaining_pool: i64) -> Blockchain<T> {
+    fn new(genesis_block: Block<T>, data_units_per_block: u64, remaining_pool: i64) -> Blockchain<T> {
         Blockchain {
             last_block: Some(Box::new(genesis_block)),
             chain_length: 0,
             uncommitted_data: vec![],
-            data_units_per_block: 2 * blockchain::TRANSACTIONS_PER_BLOCK,
+            data_units_per_block,
             remaining_pool,
         }
     }
@@ -402,7 +401,10 @@ impl<T> Blockchain<T> where T: BlockchainData {
             None, genesis_transactions, 0, BlockKey::default(),
         );
 
-        let mut blockchain = Blockchain::new(genesis_block, 21000000);
+        let mut blockchain = Blockchain::new(
+            genesis_block, 2 * blockchain::TRANSACTIONS_PER_BLOCK,
+            21000000
+        );
         blockchain.mint(to_mint);
         blockchain
     }
@@ -413,14 +415,16 @@ impl<T> Blockchain<T> where T: BlockchainData {
                 Wallet {
                     address: blockchain::MINTING_WALLET_ADDRESS,
                     public_key: None,
-                },
-                Wallet {
+                }, Wallet {
                     address: *blockchain::STAKE_WALLET_ADDRESS,
+                    public_key: None
+                }, Wallet {
+                    address: *blockchain::REWARD_WALLET_ADDRESS,
                     public_key: None
                 }
             ], 0, BlockKey::default(),
         );
-        Blockchain::new(genesis_block, 0)
+    Blockchain::new(genesis_block, 1, 0)
     }
 
     pub fn last_block(&self) -> &BlockPointer<T> {
@@ -479,7 +483,7 @@ impl<T> Blockchain<T> where T: BlockchainData {
     pub fn remaining_pool(&self) -> i64 {
         self.remaining_pool
     }
-    
+
     pub fn has_enough_uncommitted_data(&self) -> bool {
         self.uncommitted_data.len() == self.data_units_per_block as usize
     }

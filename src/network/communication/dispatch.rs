@@ -66,19 +66,30 @@ fn dispatch_blockchain_event(
         BlockchainMessage::SubmitTransaction(transaction) => {
             transactions.add_uncommitted(transaction);
             if transactions.has_enough_uncommitted_data() && node_state.should_create_block() {
-
+                forge_block(swarm, transactions, node_state);
             }
         }
-        BlockchainMessage::SubmitBlock { block_dto } => on_submit_block(
-            swarm, transactions, wallets, node_state, stakes, block_dto
-        ),
-        BlockchainMessage::Vote { block_valid } => on_vote_received(
-            swarm, transactions, sending_peer, node_state, block_valid,
-        ),
-        BlockchainMessage::Bid(stake_bid) => on_stake_raised(
-            swarm, transactions, sending_peer, node_state, stakes, stake_bid,
-        ),
-        BlockchainMessage::Sync { .. } => { todo!() }
+        BlockchainMessage::SubmitBlock { block_dto } => {
+            on_submit_block(swarm, transactions, wallets, node_state, stakes, block_dto);
+        }
+        BlockchainMessage::Vote { block_valid } => {
+            on_vote_received(swarm, transactions, sending_peer, node_state, block_valid);
+        }
+        BlockchainMessage::Bid(stake_bid) => {
+            on_stake_raised(swarm, transactions, sending_peer, node_state, stakes, stake_bid);
+        }
+        BlockchainMessage::Join(wallet) => {
+            let new_block = BlockCandidate::create_new(
+                vec![wallet], wallets.last_block(),
+            );
+            match new_block {
+                Ok(block) => {
+                    wallets.submit_new_block(block);
+                }
+                Err(error) => println!("{}", error.message())
+            }
+        }
+        BlockchainMessage::Sync { .. } => {}
     }
 }
 
@@ -88,7 +99,7 @@ fn on_submit_block(
     wallets: &mut Blockchain<Wallet>,
     node_state: &mut NodeState,
     stakes: &mut Blockchain<Transaction>,
-    block_dto: BlockDto<Transaction>
+    block_dto: BlockDto<Transaction>,
 ) {
     let block_candidate = BlockCandidate::from(block_dto);
     let transaction_validator = TransactionValidator::new(
@@ -128,17 +139,7 @@ fn on_stake_raised(
         stakes.submit_new_block(stakes_block);
         node_state.set_block_creator(winner.clone());
         if node_state.should_create_block() {
-            match try_forge_block(transactions) {
-                Ok(block_candidate) => {
-                    communication::publish_message(
-                        swarm,
-                        BlockchainMessage::SubmitBlock {
-                            block_dto: BlockDto::from(block_candidate)
-                        },
-                    )
-                }
-                Err(error) => println!("{}", error.message())
-            }
+            forge_block(swarm, transactions, node_state);
         }
         node_state.reset_peer_bids();
     }
@@ -162,20 +163,50 @@ fn on_vote_received(
     }
 }
 
-fn try_forge_block<T>(
-    blockchain: &mut Blockchain<T>
-) -> Result<BlockCandidate<T>, Box<dyn BlockchainError>> where T: BlockchainData {
-    let data = blockchain.uncommitted_data();
-    let required_units = blockchain.data_units_per_block();
+fn forge_block(
+    swarm: &mut Swarm<BlockchainBehaviour>,
+    transactions: &mut Blockchain<Transaction>,
+    node_state: &mut NodeState
+) {
+    match try_forge_block(transactions, node_state) {
+        Ok(block_candidate) => {
+            communication::publish_message(
+                swarm,
+                BlockchainMessage::SubmitBlock {
+                    block_dto: BlockDto::from(block_candidate)
+                },
+            )
+        }
+        Err(error) => println!("{}", error.message())
+    }
+}
+
+fn try_forge_block(
+    transactions: &mut Blockchain<Transaction>, node_state: &mut NodeState,
+) -> Result<BlockCandidate<Transaction>, Box<dyn BlockchainError>> {
+    let data = transactions.uncommitted_data();
+    let required_units = transactions.data_units_per_block();
     if data.len() < required_units as usize {
         return Err(Box::new(
             TransactionCountError::new(
                 required_units, data.len() as u64,
             )));
     } else {
-        let to_commit = &data[..blockchain.data_units_per_block() as usize].to_vec();
+        let mut to_commit = Vec::new();
+        to_commit.extend_from_slice(&data[..transactions.data_units_per_block() as usize]);
+        let node_bid = node_state.node_bid().clone().unwrap();
+        let wallet_node_address = node_state.user_wallet().address();
+        to_commit.push(
+            Transaction::stake_return(
+                node_bid.stake(),
+                wallet_node_address,
+            )
+        );
+        to_commit.push(
+            Transaction::forging_reward(wallet_node_address)
+        );
         BlockCandidate::create_new(
-            to_commit.clone(), blockchain.last_block(),
+            to_commit.clone(), transactions.last_block(),
         )
     }
 }

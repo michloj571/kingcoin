@@ -154,6 +154,7 @@ impl<T> From<BlockCandidate<T>> for BlockDto<T> where T: BlockchainData + Summar
 
 #[derive(Serialize, Deserialize)]
 pub enum BlockchainMessage {
+    Join(Wallet),
     Sync {
         transactions: BlockchainDto<Transaction>,
         wallets: BlockchainDto<Wallet>,

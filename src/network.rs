@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use libp2p::{core::upgrade, gossipsub, identity::Keypair, mdns::{Event, tokio::Behaviour as TokioBehaviour}, mdns, mplex, noise, PeerId, Swarm, swarm::NetworkBehaviour, tcp::{Config, tokio::Transport as TokioTransport}, Transport};
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, IdentTopic, MessageAuthenticity, ValidationMode};
 
-use crate::blockchain::{StakeBid, Transaction, Wallet};
+use crate::blockchain::{HotWallet, StakeBid, Transaction};
 use crate::blockchain::core::{BlockCandidate, Blockchain};
 use crate::network::communication::{Vote, VotingResult};
 
@@ -18,8 +18,8 @@ lazy_static! {
 
 pub struct NodeState {
     node_id: PeerId,
-    user_wallet: Wallet,
-    node_bid: StakeBid,
+    user_wallet: HotWallet,
+    node_bid: Option<StakeBid>,
     peers_bids: HashMap<PeerId, StakeBid>,
     block_creator: Option<PeerId>,
     bad_peers: HashSet<PeerId>,
@@ -30,16 +30,15 @@ pub struct NodeState {
 
 impl NodeState {
     pub fn init(
-        node_id: PeerId, user_wallet: Wallet,
+        node_id: PeerId, user_wallet: HotWallet,
         transactions: &Blockchain<Transaction>,
         stakes: &Blockchain<Transaction>,
     ) -> NodeState {
-        let bid = user_wallet.balance(transactions, stakes) * 75 / 100;
         let wallet_address = user_wallet.address();
         NodeState {
             node_id,
             user_wallet,
-            node_bid: StakeBid::bid(bid, wallet_address),
+            node_bid: None,
             peers_bids: HashMap::new(),
             block_creator: None,
             bad_peers: HashSet::new(),
@@ -52,7 +51,11 @@ impl NodeState {
         self.node_id
     }
 
-    pub fn node_bid(&self) -> &StakeBid {
+    pub fn user_wallet(&self) -> &HotWallet {
+        &self.user_wallet
+    }
+
+    pub fn node_bid(&self) -> &Option<StakeBid> {
         &self.node_bid
     }
 
@@ -84,7 +87,7 @@ impl NodeState {
     }
 
     pub fn update_bid(&mut self, bid: StakeBid) {
-        self.node_bid = bid;
+        self.node_bid = Some(bid);
     }
 
     pub fn all_bade(&self, peer_count: usize) -> bool {
@@ -117,7 +120,7 @@ impl NodeState {
         mem::take(&mut self.block_creator)
     }
 
-    pub fn summarize_votes(&self) -> VotingResult {
+    pub fn summarize_votes(&mut self) -> VotingResult {
         let mut block_valid = 0;
         let mut block_invalid = 0;
         for vote in &self.votes {
@@ -127,20 +130,24 @@ impl NodeState {
                 block_invalid += 1;
             }
         }
+        self.votes.clear();
         VotingResult::evaluate(block_valid, block_invalid)
     }
 
-    pub fn select_highest_bid(&self) -> (&PeerId, &StakeBid) {
-        let max_peer_bid = self.peers_bids
+    pub fn select_highest_bid(&self) -> (PeerId, StakeBid) {
+        let (peer_id, peer_bid) = self.peers_bids
             .iter()
             .max_by(|first, second| {
                 first.1.stake().cmp(&second.1.stake())
             }).unwrap();
-        if max_peer_bid.1.stake() > self.node_bid.stake() {
-            max_peer_bid
-        } else {
-            (&self.node_id, &self.node_bid)
-        }
+
+        self.node_bid.clone().map_or((peer_id.clone(), peer_bid.clone()), |bid| {
+            if peer_bid.stake() > bid.stake() {
+                (peer_id.clone(), peer_bid.clone())
+            } else {
+                (self.node_id.clone(), bid.clone())
+            }
+        })
     }
     pub fn reset_peer_bids(&mut self) {
         self.peers_bids.clear();
