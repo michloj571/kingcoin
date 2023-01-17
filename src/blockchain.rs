@@ -108,6 +108,13 @@ impl Transaction {
         )
     }
 
+    pub fn mint(allowance: i64, target_address: Address) -> Transaction {
+        Transaction::new(
+            MINTING_WALLET_ADDRESS, target_address,
+            "MINT".to_string(), allowance, Utc::now()
+        )
+    }
+
     pub fn stake_return(bid: i64, target_address: Address) -> Transaction {
         Transaction::new(
             *STAKE_WALLET_ADDRESS, target_address, "".to_string(),
@@ -470,6 +477,7 @@ impl Summary for Wallet {
 
 impl BlockchainData for Wallet {}
 
+#[derive(Debug)]
 struct BalanceError;
 
 impl BlockchainError for BalanceError {
@@ -478,6 +486,7 @@ impl BlockchainError for BalanceError {
     }
 }
 
+#[derive(Debug)]
 struct TransactionValidationError;
 
 impl BlockchainError for TransactionValidationError {

@@ -100,7 +100,6 @@ fn dispatch_blockchain_event(
             if node_state.voting_in_progress() {
                 communication::publish_message(swarm, BlockchainMessage::JoinDenied)
             } else {
-                node_state.add_peer_wallet(sending_peer, wallet);
                 communication::publish_message(
                     swarm, BlockchainMessage::Sync {
                         transactions: BlockchainDto::from(transactions),

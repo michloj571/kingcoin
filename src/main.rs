@@ -1,4 +1,4 @@
-use std::collections::{HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::str::FromStr;
 
@@ -13,6 +13,7 @@ use tokio::io::{self, AsyncBufReadExt};
 
 use kingcoin::{blockchain::{core::Blockchain, Transaction, Wallet}, blockchain, network::{self, communication::dispatch, NodeState}};
 use kingcoin::blockchain::{Address, HotWallet};
+use kingcoin::blockchain::core::BlockCandidate;
 use kingcoin::network::{BlockchainBehaviour, BlockchainBehaviourEvent, communication};
 use kingcoin::network::communication::{BlockchainDto, BlockchainMessage};
 
@@ -58,7 +59,7 @@ fn dispatch_command(
     node_state: &mut NodeState,
     transactions: &mut Blockchain<Transaction>,
     stakes: &Blockchain<Transaction>,
-    swarm: &mut Swarm<BlockchainBehaviour>
+    swarm: &mut Swarm<BlockchainBehaviour>,
 ) -> bool {
     match command {
         None => true,
@@ -73,19 +74,28 @@ fn parse(
     node_state: &mut NodeState,
     transactions: &mut Blockchain<Transaction>,
     stakes: &Blockchain<Transaction>,
-    swarm: &mut Swarm<BlockchainBehaviour>
+    swarm: &mut Swarm<BlockchainBehaviour>,
 ) -> bool {
     let tokens = command.split(' ').collect::<Vec<&str>>();
     let supported_commands = HashSet::from([
-        "send", "list", "exit"
+        "send", "list", "exit", "balance"
     ]);
     match tokens.len() {
         1 => {
             let token = tokens.get(0).unwrap();
             if token.eq_ignore_ascii_case("exit") {
                 false
+            } else if token.eq_ignore_ascii_case("list") {
+                list_transactions(node_state.user_wallet(), transactions);
+                true
+            } else if token.eq_ignore_ascii_case("balance") {
+                let balance = node_state.user_wallet().to_wallet().balance(
+                    transactions, stakes,
+                );
+                println!("Your balance: {balance}KGC");
+                true
             } else {
-                list_transactions(node_state.user_wallet(),transactions);
+                println!("invalid command");
                 true
             }
         }
@@ -126,7 +136,7 @@ fn parse(
 fn submit_transaction(
     transactions: &mut Blockchain<Transaction>,
     swarm: &mut Swarm<BlockchainBehaviour>,
-    tokens: Vec<&str>, amount: i64, wallet: &HotWallet
+    tokens: Vec<&str>, amount: i64, wallet: &HotWallet,
 ) {
     let source_address = wallet.address();
     let target_address = tokens.get(2).unwrap();
@@ -136,29 +146,29 @@ fn submit_transaction(
 
     let mut transaction = Transaction::new(
         source_address, target_address,
-        "".to_string(), amount, Utc::now()
+        "".to_string(), amount, Utc::now(),
     );
     let mut transaction_fee = Transaction::new(
         source_address, *blockchain::REWARD_WALLET_ADDRESS,
-        "".to_string(), blockchain::TRANSACTION_FEE, Utc::now()
+        "".to_string(), blockchain::TRANSACTION_FEE, Utc::now(),
     );
     transaction.sign(
         BlindedSigningKey::from(
             wallet.private_key().clone()
-        ), &mut rng
+        ), &mut rng,
     );
     transaction_fee.sign(
         BlindedSigningKey::from(
             wallet.private_key().clone()
-        ), &mut rng
+        ), &mut rng,
     );
     transactions.add_uncommitted(transaction.clone());
     transactions.add_uncommitted(transaction_fee.clone());
     communication::publish_message(
         swarm, BlockchainMessage::SubmitTransaction {
             transaction,
-            transaction_fee
-        }
+            transaction_fee,
+        },
     );
 }
 
@@ -231,7 +241,7 @@ async fn sync_peer(
         tokio::select! {
             event = swarm.select_next_some() => {
                 subscribed = joined_on_subscribed(
-                    swarm, node_state.user_wallet().to_wallet(), event
+                    swarm, node_state, node_state.user_wallet().to_wallet(),event
                 )
             }
         }
@@ -252,7 +262,7 @@ async fn sync_peer(
 fn find_peer<H>(
     swarm: &mut Swarm<BlockchainBehaviour>,
     event: SwarmEvent<BlockchainBehaviourEvent, H>,
-    node_state: &mut NodeState
+    node_state: &mut NodeState,
 ) -> bool {
     match event {
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(event)) => {
@@ -264,10 +274,14 @@ fn find_peer<H>(
 }
 
 fn joined_on_subscribed<H>(
-    swarm: &mut Swarm<BlockchainBehaviour>,
+    swarm: &mut Swarm<BlockchainBehaviour>, node_state: &mut NodeState,
     wallet: Wallet, event: SwarmEvent<BlockchainBehaviourEvent, H>,
 ) -> bool {
     match event {
+        SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(event)) => {
+            dispatch::dispatch_mdns(swarm, event, node_state);
+            false
+        },
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossipsub(event)) => {
             match event {
                 GossipsubEvent::Subscribed { .. } => {
@@ -290,6 +304,10 @@ fn handled_sync_packet<H>(
     event: SwarmEvent<BlockchainBehaviourEvent, H>,
 ) -> bool {
     match event {
+        SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(event)) => {
+            dispatch::dispatch_mdns(swarm, event, node_state);
+            false
+        }
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossipsub(
                                   GossipsubEvent::Message {
                                       propagation_source: peer_id,
@@ -313,6 +331,13 @@ fn handled_sync_packet<H>(
                         }
 
                         node_state.add_wallets(wallets);
+                        let initial_allowance = node_state.wallets().iter()
+                            .map(|wallet| Transaction::mint(1000, wallet.address()))
+                            .collect::<Vec<Transaction>>();
+                        let allowance_block = BlockCandidate::create_new(
+                            initial_allowance, transactions.last_block(),
+                        ).unwrap();
+                        transactions.submit_new_block(allowance_block);
 
                         true
                     }

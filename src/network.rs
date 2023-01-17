@@ -34,7 +34,7 @@ impl NodeState {
     pub fn init(
         node_id: PeerId, user_wallet: HotWallet,
     ) -> NodeState {
-        let mut wallets = NodeState::default_wallets();
+        let mut wallets = HashSet::new();
         wallets.insert(user_wallet.to_wallet());
         NodeState {
             node_id,
@@ -101,9 +101,9 @@ impl NodeState {
         }
     }
 
-    pub fn add_peer_wallet(&mut self, peer_id: PeerId, wallet: Wallet) {
+    pub fn add_peer_wallet(&mut self, peer_id: PeerId, wallet: Wallet) -> Option<Wallet> {
         self.wallets.insert(wallet.clone());
-        self.peers_wallets.insert(peer_id, wallet);
+        self.peers_wallets.insert(peer_id, wallet)
     }
 
     pub fn voting_in_progress(&self) -> bool {

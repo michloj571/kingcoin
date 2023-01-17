@@ -1,3 +1,5 @@
+use std::cmp::min;
+use std::fmt::Debug;
 use std::mem;
 
 use chrono::{DateTime, Utc};
@@ -16,7 +18,7 @@ pub trait Summary {
     fn summary(&self) -> String;
 }
 
-pub trait BlockchainError {
+pub trait BlockchainError : Debug{
     fn message(&self) -> String;
 }
 
@@ -24,16 +26,19 @@ pub trait Validate<T> where T: BlockchainData {
     fn block_valid(&self, block: &BlockCandidate<T>) -> Result<(), Box<dyn BlockchainError>>;
 }
 
+#[derive(Debug)]
 pub struct TransactionCountError {
     required_count: u64,
     actual_count: u64,
 }
 
+#[derive(Debug)]
 pub struct BlockValidationError {
     block_summary: String,
     message: String,
 }
 
+#[derive(Debug)]
 pub struct BlockCreationError;
 
 pub struct BlockAdditionResult {
@@ -422,7 +427,11 @@ impl<T> Blockchain<T> where T: BlockchainData {
     }
 
     fn remove_uncommitted_data(&mut self) {
-        self.uncommitted_data.drain(..self.data_units_per_block as usize).count();
+        let limit = min(
+            self.uncommitted_data.len(),
+            self.data_units_per_block as usize
+        );
+        self.uncommitted_data.drain(..limit).count();
     }
 
     fn append_block(&mut self, mut block: Block<T>) -> BlockAdditionResult {
