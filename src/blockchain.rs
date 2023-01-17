@@ -103,7 +103,7 @@ impl Transaction {
 
     pub fn stake_bid(bid: i64, source_address: Address) -> Transaction {
         Transaction::new(
-            source_address, *STAKE_WALLET_ADDRESS, "".to_string(),
+            source_address, *STAKE_WALLET_ADDRESS, "STAKE BID".to_string(),
             bid, Utc::now(),
         )
     }
@@ -117,14 +117,14 @@ impl Transaction {
 
     pub fn stake_return(bid: i64, target_address: Address) -> Transaction {
         Transaction::new(
-            *STAKE_WALLET_ADDRESS, target_address, "".to_string(),
+            *STAKE_WALLET_ADDRESS, target_address, "STAKE RETURN".to_string(),
             bid, Utc::now(),
         )
     }
 
     pub fn forging_reward(target_address: Address) -> Transaction {
         Transaction::new(
-            *REWARD_WALLET_ADDRESS, target_address, "".to_string(),
+            *REWARD_WALLET_ADDRESS, target_address, "REWARD".to_string(),
             TRANSACTION_FEE * TRANSACTIONS_PER_BLOCK as i64, Utc::now(),
         )
     }

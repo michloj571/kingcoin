@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::error::Error;
+use std::os::macos::raw::stat;
 use std::str::FromStr;
 
 use chrono::Utc;
@@ -12,8 +13,7 @@ use rsa::RsaPrivateKey;
 use tokio::io::{self, AsyncBufReadExt};
 
 use kingcoin::{blockchain::{core::Blockchain, Transaction, Wallet}, blockchain, network::{self, communication::dispatch, NodeState}};
-use kingcoin::blockchain::{Address, HotWallet};
-use kingcoin::blockchain::core::BlockCandidate;
+use kingcoin::blockchain::{Address, HotWallet, StakeBid};
 use kingcoin::network::{BlockchainBehaviour, BlockchainBehaviourEvent, communication};
 use kingcoin::network::communication::{BlockchainDto, BlockchainMessage};
 
@@ -27,8 +27,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mut transactions,
         mut stakes
     ) = initialize_node(&mut swarm).await;
+    println!(
+        "This node wallet:{}",
+        array_bytes::bytes2hex("", node_state.user_wallet().address())
+    );
+    get_allowance(&mut swarm, &mut node_state, &mut transactions).await;
     let mut stdin = BufReader::new(io::stdin()).lines();
-    println!("listening");
     loop {
         tokio::select! {
             io_result = stdin.next_line() => {
@@ -36,7 +40,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(command) => {
                         let stop = !dispatch_command(
                             command, &mut node_state,
-                            &mut transactions, &stakes, &mut swarm
+                            &mut transactions, &mut stakes, &mut swarm
                         );
                         if stop {
                             break Ok(());
@@ -58,7 +62,7 @@ fn dispatch_command(
     command: Option<String>,
     node_state: &mut NodeState,
     transactions: &mut Blockchain<Transaction>,
-    stakes: &Blockchain<Transaction>,
+    stakes: &mut Blockchain<Transaction>,
     swarm: &mut Swarm<BlockchainBehaviour>,
 ) -> bool {
     match command {
@@ -73,7 +77,7 @@ fn parse(
     command: String,
     node_state: &mut NodeState,
     transactions: &mut Blockchain<Transaction>,
-    stakes: &Blockchain<Transaction>,
+    stakes: &mut Blockchain<Transaction>,
     swarm: &mut Swarm<BlockchainBehaviour>,
 ) -> bool {
     let tokens = command.split(' ').collect::<Vec<&str>>();
@@ -92,7 +96,7 @@ fn parse(
                 let balance = node_state.user_wallet().to_wallet().balance(
                     transactions, stakes,
                 );
-                println!("Your balance: {balance}KGC");
+                println!("Your balance: {balance}KGC\n");
                 true
             } else {
                 println!("invalid command");
@@ -115,7 +119,47 @@ fn parse(
                 let balance = wallet.to_wallet().balance(transactions, stakes);
                 let required_balance = amount + blockchain::TRANSACTION_FEE;
                 if balance >= required_balance {
-                    submit_transaction(transactions, swarm, tokens, amount, wallet);
+                    let source_address = wallet.address();
+                    let target_address = tokens.get(2).unwrap();
+                    let target_address: Address = array_bytes::hex2array(target_address).unwrap();
+
+                    let mut rng = rand::thread_rng();
+
+                    let mut transaction = Transaction::new(
+                        source_address, target_address,
+                        "".to_string(), amount, Utc::now(),
+                    );
+                    let mut transaction_fee = Transaction::new(
+                        source_address, *blockchain::REWARD_WALLET_ADDRESS,
+                        "".to_string(), blockchain::TRANSACTION_FEE, Utc::now(),
+                    );
+                    transaction.sign(
+                        BlindedSigningKey::from(
+                            wallet.private_key().clone()
+                        ), &mut rng,
+                    );
+                    transaction_fee.sign(
+                        BlindedSigningKey::from(
+                            wallet.private_key().clone()
+                        ), &mut rng,
+                    );
+                    transactions.add_uncommitted(transaction.clone());
+                    transactions.add_uncommitted(transaction_fee.clone());
+                    if transactions.has_enough_uncommitted_data() {
+                        communication::publish_message(
+                            swarm, BlockchainMessage::SubmitTransaction {
+                                transaction, transaction_fee
+                            }
+                        );
+                        let bid = node_state.user_wallet()
+                            .to_wallet()
+                            .balance(transactions, stakes) * 75 / 100;
+                        node_state.update_bid(StakeBid::bid(bid, node_state.user_wallet().address()));
+                        communication::publish_message(
+                            swarm,
+                            BlockchainMessage::Bid(node_state.node_bid().unwrap()),
+                        );
+                    }
                 } else {
                     println!(
                         "Balance to low. Your balance: {}KGC, required: {}KGC",
@@ -137,62 +181,99 @@ fn submit_transaction(
     transactions: &mut Blockchain<Transaction>,
     swarm: &mut Swarm<BlockchainBehaviour>,
     tokens: Vec<&str>, amount: i64, wallet: &HotWallet,
+    node_state: &mut NodeState, stakes: &mut Blockchain<Transaction>,
 ) {
-    let source_address = wallet.address();
-    let target_address = tokens.get(2).unwrap();
-    let target_address: Address = array_bytes::hex2array(target_address).unwrap();
 
-    let mut rng = rand::thread_rng();
-
-    let mut transaction = Transaction::new(
-        source_address, target_address,
-        "".to_string(), amount, Utc::now(),
-    );
-    let mut transaction_fee = Transaction::new(
-        source_address, *blockchain::REWARD_WALLET_ADDRESS,
-        "".to_string(), blockchain::TRANSACTION_FEE, Utc::now(),
-    );
-    transaction.sign(
-        BlindedSigningKey::from(
-            wallet.private_key().clone()
-        ), &mut rng,
-    );
-    transaction_fee.sign(
-        BlindedSigningKey::from(
-            wallet.private_key().clone()
-        ), &mut rng,
-    );
-    transactions.add_uncommitted(transaction.clone());
-    transactions.add_uncommitted(transaction_fee.clone());
-    communication::publish_message(
-        swarm, BlockchainMessage::SubmitTransaction {
-            transaction,
-            transaction_fee,
-        },
-    );
 }
 
 fn list_transactions(wallet: &HotWallet, transactions: &Blockchain<Transaction>) {
     let mut current_block = transactions.last_block();
-    let mut result = String::new();
+    println!("Your transactions:");
     loop {
         match current_block {
             None => break,
             Some(block) => {
                 block.data()
                     .iter()
-                    .filter(|transaction| transaction.source_address() == wallet.address())
+                    .filter(|transaction| {
+                        transaction.source_address() == wallet.address() ||
+                            transaction.target_address() == wallet.address()
+                    })
                     .for_each(|transaction| {
-                        let transaction = serde_json::to_string_pretty(transaction).unwrap();
-                        result.push_str(&transaction);
-                        result.push('\n');
+                        let transaction = serde_json::to_string(transaction).unwrap();
+                        println!("{transaction}");
                     });
                 current_block = block.previous_block();
             }
         }
     }
-    println!("Your transactions:");
-    println!("{result}");
+    println!();
+}
+
+async fn get_allowance(
+    swarm: &mut Swarm<BlockchainBehaviour>,
+    node_state: &mut NodeState, transactions: &mut Blockchain<Transaction>) {
+    let mut granted = false;
+    let wallet = node_state.user_wallet().to_wallet();
+    while !granted {
+        communication::publish_message(
+            swarm, BlockchainMessage::GrantAllowance(wallet.clone())
+        );
+        tokio::select! {
+            event = swarm.select_next_some() => {
+                granted = request_allowance(event, transactions, swarm, node_state);
+            }
+        }
+    }
+}
+
+fn request_allowance<H>(
+    event: SwarmEvent<BlockchainBehaviourEvent, H>,
+    transactions: &mut Blockchain<Transaction>,
+    swarm: &mut Swarm<BlockchainBehaviour>, node_state: &mut NodeState,
+) -> bool {
+    match event {
+        SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(event)) => {
+            dispatch::dispatch_mdns(swarm, event, node_state);
+            false
+        }
+        SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossipsub(
+                                  GossipsubEvent::Message {
+                                      propagation_source: peer_id,
+                                      message_id: _id,
+                                      message,
+                                  })
+        ) => {
+            if let Ok(message) = serde_json::from_slice::<BlockchainMessage>(&message.data) {
+                match message {
+                    BlockchainMessage::Granted(amount) => {
+                        dispatch::assign_allowance(
+                            transactions,
+                            &node_state.user_wallet().to_wallet(),
+                            amount,
+                        );
+                        true
+                    }
+                    BlockchainMessage::GrantAllowance(wallet) => {
+                        if node_state.add_peer_wallet(peer_id, wallet.clone()).is_none() {
+                            let amount = transactions.mint(1000);
+
+                            dispatch::assign_allowance(transactions, &wallet, amount);
+
+                            communication::publish_message(
+                                swarm, BlockchainMessage::Granted(amount),
+                            );
+                        }
+                        false
+                    }
+                    _ => false
+                }
+            } else {
+                false
+            }
+        }
+        _ => false
+    }
 }
 
 async fn initialize_node(
@@ -281,7 +362,7 @@ fn joined_on_subscribed<H>(
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(event)) => {
             dispatch::dispatch_mdns(swarm, event, node_state);
             false
-        },
+        }
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossipsub(event)) => {
             match event {
                 GossipsubEvent::Subscribed { .. } => {
@@ -331,13 +412,6 @@ fn handled_sync_packet<H>(
                         }
 
                         node_state.add_wallets(wallets);
-                        let initial_allowance = node_state.wallets().iter()
-                            .map(|wallet| Transaction::mint(1000, wallet.address()))
-                            .collect::<Vec<Transaction>>();
-                        let allowance_block = BlockCandidate::create_new(
-                            initial_allowance, transactions.last_block(),
-                        ).unwrap();
-                        transactions.submit_new_block(allowance_block);
 
                         true
                     }

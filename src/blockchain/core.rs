@@ -53,7 +53,7 @@ pub struct BlockKey {
     previous_hash: Option<BlockHash>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct BlockCandidate<T> where T: BlockchainData {
     key: BlockKey,
     block_number: u64,
@@ -458,12 +458,14 @@ impl<T> Blockchain<T> where T: BlockchainData {
         self.uncommitted_data.push(data);
     }
 
-    pub fn mint(&mut self, amount: i64) -> i64 {
+    pub fn mint(&mut self, mut amount: i64) -> i64 {
         if amount <= self.remaining_pool {
             self.remaining_pool -= amount;
-            self.remaining_pool
+            amount
         } else {
-            0
+            amount = self.remaining_pool;
+            self.remaining_pool = 0;
+            amount
         }
     }
 
@@ -472,7 +474,7 @@ impl<T> Blockchain<T> where T: BlockchainData {
     }
 
     pub fn has_enough_uncommitted_data(&self) -> bool {
-        self.uncommitted_data.len() == self.data_units_per_block as usize
+        self.uncommitted_data.len() as u64 == self.data_units_per_block
     }
 
     pub fn submit_new_block(

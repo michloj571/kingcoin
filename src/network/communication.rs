@@ -156,7 +156,9 @@ impl<T> From<BlockCandidate<T>> for BlockDto<T> where T: BlockchainData + Summar
 #[derive(Serialize, Deserialize)]
 pub enum BlockchainMessage {
     Join(Wallet),
-    JoinDenied,
+    GrantAllowance(Wallet),
+    Denied,
+    Granted(i64),
     Sync {
         transactions: BlockchainDto<Transaction>,
         wallets: HashSet<Wallet>,

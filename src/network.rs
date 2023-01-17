@@ -79,7 +79,9 @@ impl NodeState {
     }
 
     pub fn add_wallets(&mut self, wallets: HashSet<Wallet>) {
-        self.wallets.extend(wallets);
+        wallets.iter()
+            .map(|wallet| wallet.clone())
+            .for_each(|wallet| { self.wallets.insert(wallet); })
     }
 
     pub fn user_wallet(&self) -> &HotWallet {
@@ -119,15 +121,16 @@ impl NodeState {
     }
 
     pub fn update_peers_bids(&mut self, peer_id: PeerId, bid: StakeBid) {
-        self.peers_bids.insert(peer_id, bid);
+        let inserted =  self.peers_bids.insert(peer_id, bid).is_none();
     }
 
     pub fn update_bid(&mut self, bid: StakeBid) {
         self.node_bid = Some(bid);
     }
 
-    pub fn all_bade(&self) -> bool {
-        self.peers_bids.len() == self.wallets.len() - 1
+    pub fn all_bade(&self, peers: usize) -> bool {
+        let p = self.peers_bids.len();
+        self.peers_bids.len() == peers
     }
 
     pub fn add_vote(&mut self, vote: Vote) {
@@ -136,7 +139,7 @@ impl NodeState {
     }
 
     pub fn all_voted(&self) -> bool {
-        self.votes.len() == self.wallets.len() - 1
+            self.votes.len() == self.wallets.len() - 1
     }
 
     pub fn take_pending_block(&mut self) -> Option<BlockCandidate<Transaction>> {
