@@ -497,7 +497,6 @@ impl BlockchainError for TransactionValidationError {
 
 mod test {
     use std::collections::HashSet;
-
     use chrono::Utc;
     use rsa::{RsaPrivateKey, RsaPublicKey};
     use rsa::pss::BlindedSigningKey;
@@ -509,6 +508,34 @@ mod test {
     use crate::blockchain::{BlockchainData, MINTING_WALLET_ADDRESS, REWARD_WALLET_ADDRESS, STAKE_WALLET_ADDRESS, Transaction, TRANSACTION_FEE, TransactionValidator, Wallet};
     use crate::blockchain::core::{Block, BlockCandidate, Blockchain, BlockchainError, BlockKey, BlockPointer, Summary, Validate};
     use crate::BlockHash;
+
+    fn prepare_wallets_hashset(first_key: &RsaPrivateKey,
+                               second_key: &RsaPrivateKey, third_key: &RsaPrivateKey,
+    ) -> HashSet<Wallet> {
+        let mut wallets: HashSet<Wallet> = HashSet::new();
+        wallets.insert(Wallet {
+            address: [1; 32],
+            public_key: Some(RsaPublicKey::from(first_key)),
+        });
+        wallets.insert(Wallet {
+            address: [2; 32],
+            public_key: Some(RsaPublicKey::from(second_key)),
+        });
+        wallets.insert(Wallet {
+            address: [3; 32],
+            public_key: Some(RsaPublicKey::from(third_key)),
+        });
+        wallets
+    }
+
+    fn prepare_block_candidate<T>(
+        previous_block: &BlockPointer<T>, data: Vec<T>,
+    ) -> BlockCandidate<T> where T: BlockchainData {
+        match BlockCandidate::create_new(data, previous_block) {
+            Ok(block_candidate) => block_candidate,
+            Err(error) => panic!("{}", error.message())
+        }
+    }
 
     #[test]
     fn ok_on_valid_transaction() {
@@ -586,31 +613,453 @@ mod test {
         }
     }
 
-    fn prepare_wallets_hashset(first_key: &RsaPrivateKey,
-                               second_key: &RsaPrivateKey, third_key: &RsaPrivateKey,
-    ) -> HashSet<Wallet> {
-        let mut wallets: HashSet<Wallet> = HashSet::new();
-        wallets.insert(Wallet {
-            address: [1; 32],
-            public_key: Some(RsaPublicKey::from(first_key)),
-        });
-        wallets.insert(Wallet {
-            address: [2; 32],
-            public_key: Some(RsaPublicKey::from(second_key)),
-        });
-        wallets.insert(Wallet {
-            address: [3; 32],
-            public_key: Some(RsaPublicKey::from(third_key)),
-        });
-        wallets
+    #[test]
+    fn error_on_transaction_not_sufficient_account() {
+        let mut rng = rand::thread_rng();
+
+        let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let wallet_set = prepare_wallets_hashset(&first_key, &second_key, &third_key);
+
+        let minted: i64 = 5;
+        let transaction_amount = 15;
+        let transactions = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [1; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [3; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+            ]
+        );
+        let bid = 5;
+        let stakes = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    [3; 32],
+                    *STAKE_WALLET_ADDRESS,
+                    "Transaction".to_string(), bid, Utc::now(),
+                )
+            ]
+        );
+        let mut transaction = Transaction::new(
+            [1; 32],
+            [2; 32],
+            "Transaction".to_string(), transaction_amount, Utc::now(),
+        );
+        transaction.sign(BlindedSigningKey::<Sha512>::new(first_key.clone()), rng.clone());
+        let mut transaction_fee = Transaction::new(
+            [1; 32],
+            *REWARD_WALLET_ADDRESS,
+            "Transaction".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        transaction_fee.sign(BlindedSigningKey::<Sha512>::new(first_key), rng);
+        let reward = Transaction::new(
+            *REWARD_WALLET_ADDRESS,
+            [3; 32],
+            "Reward".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        let stake_return = Transaction::stake_return(
+            bid, [3; 32],
+        );
+
+        let to_validate = vec![transaction, transaction_fee, stake_return, reward];
+        let block_candidate = prepare_block_candidate(
+            transactions.last_block(), to_validate,
+        );
+
+        let validator = TransactionValidator {
+            wallets: &wallet_set,
+            transactions: &transactions,
+            stakes: &stakes,
+        };
+        match validator.block_valid(&block_candidate) {
+            Ok(_) => {
+                println!("success");
+            }
+            Err(err) => {
+                panic!("validation failed: {}", err.message());
+            }
+        }
     }
 
-    fn prepare_block_candidate<T>(
-        previous_block: &BlockPointer<T>, data: Vec<T>,
-    ) -> BlockCandidate<T> where T: BlockchainData {
-        match BlockCandidate::create_new(data, previous_block) {
-            Ok(block_candidate) => block_candidate,
-            Err(error) => panic!("{}", error.message())
+    #[test]
+    fn error_on_transaction_not_existing_wallet() {
+        let mut rng = rand::thread_rng();
+
+        let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let wallet_set = prepare_wallets_hashset(&first_key, &second_key, &third_key);
+
+        let minted: i64 = 70;
+        let transaction_amount = 5;
+        let transactions = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [1; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [3; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+            ]
+        );
+        let bid = 10;
+        let stakes = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    [3; 32],
+                    *STAKE_WALLET_ADDRESS,
+                    "Transaction".to_string(), bid, Utc::now(),
+                )
+            ]
+        );
+        let mut transaction = Transaction::new(
+            [1; 32],
+            [4; 32],
+            "Transaction".to_string(), transaction_amount, Utc::now(),
+        );
+        transaction.sign(BlindedSigningKey::<Sha512>::new(first_key.clone()), rng.clone());
+        let mut transaction_fee = Transaction::new(
+            [1; 32],
+            *REWARD_WALLET_ADDRESS,
+            "Transaction".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        transaction_fee.sign(BlindedSigningKey::<Sha512>::new(first_key), rng);
+        let reward = Transaction::new(
+            *REWARD_WALLET_ADDRESS,
+            [3; 32],
+            "Reward".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        let stake_return = Transaction::stake_return(
+            bid, [3; 32],
+        );
+
+        let to_validate = vec![transaction, transaction_fee, stake_return, reward];
+        let block_candidate = prepare_block_candidate(
+            transactions.last_block(), to_validate,
+        );
+
+        let validator = TransactionValidator {
+            wallets: &wallet_set,
+            transactions: &transactions,
+            stakes: &stakes,
+        };
+        match validator.block_valid(&block_candidate) {
+            Ok(_) => {
+                println!("success");
+            }
+            Err(err) => {
+                panic!("validation failed: {}", err.message());
+            }
+        }
+    }
+
+    #[test]
+    fn error_on_stake_not_returned() {
+        let mut rng = rand::thread_rng();
+
+        let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let wallet_set = prepare_wallets_hashset(&first_key, &second_key, &third_key);
+
+        let minted: i64 = 70;
+        let transaction_amount = 5;
+        let transactions = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [1; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [3; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+            ]
+        );
+        let bid = 10;
+        let stakes = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    [3; 32],
+                    *STAKE_WALLET_ADDRESS,
+                    "Transaction".to_string(), bid, Utc::now(),
+                )
+            ]
+        );
+        let mut transaction = Transaction::new(
+            [1; 32],
+            [2; 32],
+            "Transaction".to_string(), transaction_amount, Utc::now(),
+        );
+        transaction.sign(BlindedSigningKey::<Sha512>::new(first_key.clone()), rng.clone());
+        let mut transaction_fee = Transaction::new(
+            [1; 32],
+            *REWARD_WALLET_ADDRESS,
+            "Transaction".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        transaction_fee.sign(BlindedSigningKey::<Sha512>::new(first_key), rng);
+        let reward = Transaction::new(
+            *REWARD_WALLET_ADDRESS,
+            [3; 32],
+            "Reward".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        let stake_return = Transaction::stake_return(
+            0, [3; 32],
+        );
+
+        let to_validate = vec![transaction, transaction_fee, stake_return, reward];
+        let block_candidate = prepare_block_candidate(
+            transactions.last_block(), to_validate,
+        );
+
+        let validator = TransactionValidator {
+            wallets: &wallet_set,
+            transactions: &transactions,
+            stakes: &stakes,
+        };
+        match validator.block_valid(&block_candidate) {
+            Ok(_) => {
+                println!("success");
+            }
+            Err(err) => {
+                panic!("validation failed: {}", err.message());
+            }
+        }
+    }
+
+    #[test]
+    fn error_on_wrong_bid_return() {
+        let mut rng = rand::thread_rng();
+
+        let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let wallet_set = prepare_wallets_hashset(&first_key, &second_key, &third_key);
+
+        let minted: i64 = 70;
+        let transaction_amount = 5;
+        let transactions = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [1; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [3; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+            ]
+        );
+        let bid = 10;
+        let stakes = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    [3; 32],
+                    *STAKE_WALLET_ADDRESS,
+                    "Transaction".to_string(), 30, Utc::now(),
+                )
+            ]
+        );
+        let mut transaction = Transaction::new(
+            [1; 32],
+            [2; 32],
+            "Transaction".to_string(), transaction_amount, Utc::now(),
+        );
+        transaction.sign(BlindedSigningKey::<Sha512>::new(first_key.clone()), rng.clone());
+        let mut transaction_fee = Transaction::new(
+            [1; 32],
+            *REWARD_WALLET_ADDRESS,
+            "Transaction".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        transaction_fee.sign(BlindedSigningKey::<Sha512>::new(first_key), rng);
+        let reward = Transaction::new(
+            *REWARD_WALLET_ADDRESS,
+            [3; 32],
+            "Reward".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        let stake_return = Transaction::stake_return(
+            bid, [3; 32],
+        );
+
+        let to_validate = vec![transaction, transaction_fee, stake_return, reward];
+        let block_candidate = prepare_block_candidate(
+            transactions.last_block(), to_validate,
+        );
+
+        let validator = TransactionValidator {
+            wallets: &wallet_set,
+            transactions: &transactions,
+            stakes: &stakes,
+        };
+        match validator.block_valid(&block_candidate) {
+            Ok(_) => {
+                println!("success");
+            }
+            Err(err) => {
+                panic!("validation failed: {}", err.message());
+            }
+        }
+    }
+
+    #[test]
+    fn error_on_reward_to_wrong_acc() {
+        let mut rng = rand::thread_rng();
+
+        let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let wallet_set = prepare_wallets_hashset(&first_key, &second_key, &third_key);
+
+        let minted: i64 = 70;
+        let transaction_amount = 5;
+        let transactions = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [1; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [3; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+            ]
+        );
+        let bid = 10;
+        let stakes = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    [3; 32],
+                    *STAKE_WALLET_ADDRESS,
+                    "Transaction".to_string(), bid, Utc::now(),
+                )
+            ]
+        );
+        let mut transaction = Transaction::new(
+            [1; 32],
+            [2; 32],
+            "Transaction".to_string(), transaction_amount, Utc::now(),
+        );
+        transaction.sign(BlindedSigningKey::<Sha512>::new(first_key.clone()), rng.clone());
+        let mut transaction_fee = Transaction::new(
+            [1; 32],
+            *REWARD_WALLET_ADDRESS,
+            "Transaction".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        transaction_fee.sign(BlindedSigningKey::<Sha512>::new(first_key), rng);
+        let reward = Transaction::new(
+            *REWARD_WALLET_ADDRESS,
+            [2; 32],
+            "Reward".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        let stake_return = Transaction::stake_return(
+            bid, [3; 32],
+        );
+
+        let to_validate = vec![transaction, transaction_fee, stake_return, reward];
+        let block_candidate = prepare_block_candidate(
+            transactions.last_block(), to_validate,
+        );
+
+        let validator = TransactionValidator {
+            wallets: &wallet_set,
+            transactions: &transactions,
+            stakes: &stakes,
+        };
+        match validator.block_valid(&block_candidate) {
+            Ok(_) => {
+                println!("success");
+            }
+            Err(err) => {
+                panic!("validation failed: {}", err.message());
+            }
+        }
+    }
+
+    #[test]
+    fn error_on_no_stake() {
+        let mut rng = rand::thread_rng();
+
+        let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
+        let wallet_set = prepare_wallets_hashset(&first_key, &second_key, &third_key);
+
+        let minted: i64 = 70;
+        let transaction_amount = 5;
+        let transactions = Blockchain::<Transaction>::transaction_chain(
+            vec![
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [1; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+                Transaction::new(
+                    MINTING_WALLET_ADDRESS,
+                    [3; 32],
+                    "Transaction".to_string(), minted, Utc::now(),
+                ),
+            ]
+        );
+        let bid = 10;
+        let stakes = Blockchain::<Transaction>::transaction_chain(
+            vec![]
+        );
+        let mut transaction = Transaction::new(
+            [1; 32],
+            [2; 32],
+            "Transaction".to_string(), transaction_amount, Utc::now(),
+        );
+        transaction.sign(BlindedSigningKey::<Sha512>::new(first_key.clone()), rng.clone());
+        let mut transaction_fee = Transaction::new(
+            [1; 32],
+            *REWARD_WALLET_ADDRESS,
+            "Transaction".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        transaction_fee.sign(BlindedSigningKey::<Sha512>::new(first_key), rng);
+        let reward = Transaction::new(
+            *REWARD_WALLET_ADDRESS,
+            [3; 32],
+            "Reward".to_string(), TRANSACTION_FEE, Utc::now(),
+        );
+        let stake_return = Transaction::stake_return(
+            bid, [3; 32],
+        );
+
+        let to_validate = vec![transaction, transaction_fee, stake_return, reward];
+        let block_candidate = prepare_block_candidate(
+            transactions.last_block(), to_validate,
+        );
+
+        let validator = TransactionValidator {
+            wallets: &wallet_set,
+            transactions: &transactions,
+            stakes: &stakes,
+        };
+        match validator.block_valid(&block_candidate) {
+            Ok(_) => {
+                println!("success");
+            }
+            Err(err) => {
+                panic!("validation failed: {}", err.message());
+            }
         }
     }
 }
