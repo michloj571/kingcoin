@@ -34,13 +34,16 @@ pub fn dispatch_network_event<H>(
             }
         }
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Mdns(event)) => {
-            dispatch_mdns(swarm, event)
+            dispatch_mdns(swarm, event, node_state)
         }
         _ => {}
     }
 }
 
-pub fn dispatch_mdns(swarm: &mut Swarm<BlockchainBehaviour>, event: Event) {
+pub fn dispatch_mdns(
+    swarm: &mut Swarm<BlockchainBehaviour>,
+    event: Event, node_state: &mut NodeState,
+) {
     match event {
         Event::Discovered(list) => {
             for (peer, addr) in list {
@@ -51,6 +54,7 @@ pub fn dispatch_mdns(swarm: &mut Swarm<BlockchainBehaviour>, event: Event) {
         Event::Expired(list) => {
             for (peer, addr) in list {
                 println!("expired {peer} {addr}");
+         //       node_state.kick(peer);
                 if !swarm.behaviour_mut().mdns().has_node(&peer) {
                     swarm.behaviour_mut().gossipsub().remove_explicit_peer(&peer);
                 }
@@ -66,8 +70,12 @@ fn dispatch_blockchain_event(
     node_state: &mut NodeState, stakes: &mut Blockchain<Transaction>,
 ) {
     match message {
-        BlockchainMessage::SubmitTransaction(transaction) => {
+        BlockchainMessage::SubmitTransaction {
+            transaction,
+            transaction_fee
+        } => {
             transactions.add_uncommitted(transaction);
+            transactions.add_uncommitted(transaction_fee);
             if transactions.has_enough_uncommitted_data() {
                 let bid = node_state.user_wallet()
                     .to_wallet()
@@ -92,13 +100,13 @@ fn dispatch_blockchain_event(
             if node_state.voting_in_progress() {
                 communication::publish_message(swarm, BlockchainMessage::JoinDenied)
             } else {
-                node_state.add_peer_wallet(wallet);
+                node_state.add_peer_wallet(sending_peer, wallet);
                 communication::publish_message(
                     swarm, BlockchainMessage::Sync {
                         transactions: BlockchainDto::from(transactions),
                         wallets: node_state.wallets().clone(),
                         stakes: BlockchainDto::from(stakes),
-                    }
+                    },
                 )
             }
         }
@@ -166,7 +174,7 @@ fn on_stake_raised(
         }
     } else {
         swarm.ban_peer_id(sending_peer);
-        node_state.kick(sending_peer, &wallet);
+        node_state.kick(sending_peer);
     }
 }
 
@@ -232,11 +240,4 @@ fn try_forge_block(
             to_commit.clone(), transactions.last_block(),
         )
     }
-}
-
-pub fn submit_transaction(
-    blockchain: &mut Blockchain<Transaction>, transaction: Transaction,
-) -> BlockchainMessage {
-    blockchain.add_uncommitted(transaction.clone());
-    BlockchainMessage::SubmitTransaction(transaction)
 }

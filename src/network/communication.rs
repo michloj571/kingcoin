@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use chrono::{DateTime, Utc};
@@ -160,9 +160,12 @@ pub enum BlockchainMessage {
     Sync {
         transactions: BlockchainDto<Transaction>,
         wallets: HashSet<Wallet>,
-        stakes: BlockchainDto<Transaction>
+        stakes: BlockchainDto<Transaction>,
     },
-    SubmitTransaction(Transaction),
+    SubmitTransaction {
+        transaction: Transaction,
+        transaction_fee: Transaction
+    },
     SubmitBlock {
         block_dto: BlockDto<Transaction>
     },

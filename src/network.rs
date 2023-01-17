@@ -6,8 +6,8 @@ use lazy_static::lazy_static;
 use libp2p::{core::upgrade, gossipsub, identity::Keypair, mdns::{Event, tokio::Behaviour as TokioBehaviour}, mdns, mplex, noise, PeerId, Swarm, swarm::NetworkBehaviour, tcp::{Config, tokio::Transport as TokioTransport}, Transport};
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, IdentTopic, MessageAuthenticity, ValidationMode};
 
-use crate::blockchain::{Address, HotWallet, MINTING_WALLET_ADDRESS, REWARD_WALLET_ADDRESS, STAKE_WALLET_ADDRESS, StakeBid, Transaction, Wallet};
-use crate::blockchain::core::{BlockCandidate, Blockchain};
+use crate::blockchain::{HotWallet, MINTING_WALLET_ADDRESS, REWARD_WALLET_ADDRESS, STAKE_WALLET_ADDRESS, StakeBid, Transaction, Wallet};
+use crate::blockchain::core::BlockCandidate;
 use crate::network::communication::{Vote, VotingResult};
 
 pub mod communication;
@@ -23,6 +23,7 @@ pub struct NodeState {
     peers_bids: HashMap<PeerId, StakeBid>,
     voting: bool,
     wallets: HashSet<Wallet>,
+    peers_wallets: HashMap<PeerId, Wallet>,
     block_creator: Option<PeerId>,
     votes: HashSet<Vote>,
     pending_block: Option<BlockCandidate<Transaction>>,
@@ -42,6 +43,7 @@ impl NodeState {
             peers_bids: HashMap::new(),
             voting: false,
             wallets,
+            peers_wallets: HashMap::new(),
             block_creator: None,
             votes: HashSet::new(),
             pending_block: None,
@@ -99,8 +101,9 @@ impl NodeState {
         }
     }
 
-    pub fn add_peer_wallet(&mut self, wallet: Wallet) {
-        self.wallets.insert(wallet);
+    pub fn add_peer_wallet(&mut self, peer_id: PeerId, wallet: Wallet) {
+        self.wallets.insert(wallet.clone());
+        self.peers_wallets.insert(peer_id, wallet);
     }
 
     pub fn voting_in_progress(&self) -> bool {
@@ -179,8 +182,9 @@ impl NodeState {
         self.peers_bids.clear();
     }
 
-    pub fn kick(&mut self, peer: PeerId, wallet: &Wallet) {
-        self.wallets.remove(wallet);
+    pub fn kick(&mut self, peer: PeerId) {
+        let wallet = self.peers_wallets.remove(&peer).unwrap();
+        self.wallets.remove(&wallet);
         self.peers_bids.remove(&peer);
     }
     pub fn set_wallets(&mut self, wallets: HashSet<Wallet>) {
