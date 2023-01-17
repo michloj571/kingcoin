@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use libp2p::{PeerId, Swarm};
 use libp2p::gossipsub::GossipsubEvent;
 use libp2p::mdns::Event;
@@ -6,13 +8,14 @@ use libp2p::swarm::SwarmEvent;
 use crate::blockchain::{BlockchainData, StakeBid, Transaction, TransactionValidator, Wallet};
 use crate::blockchain::core::{BlockCandidate, Blockchain, BlockchainError, TransactionCountError, Validate};
 use crate::network::{BlockchainBehaviour, BlockchainBehaviourEvent, communication::{self, BlockDto, Vote}, NodeState};
+use crate::network::communication::BlockchainDto;
 
 use super::BlockchainMessage;
 
 pub fn dispatch_network_event<H>(
     event: SwarmEvent<BlockchainBehaviourEvent, H>, swarm: &mut Swarm<BlockchainBehaviour>,
-    transactions: &mut Blockchain<Transaction>, wallets: &mut Blockchain<Wallet>,
-    node_state: &mut NodeState, stakes: &mut Blockchain<Transaction>,
+    transactions: &mut Blockchain<Transaction>, node_state: &mut NodeState,
+    stakes: &mut Blockchain<Transaction>,
 ) {
     match event {
         SwarmEvent::Behaviour(BlockchainBehaviourEvent::Gossipsub(
@@ -24,8 +27,9 @@ pub fn dispatch_network_event<H>(
         ) => {
             if let Ok(message) = serde_json::from_slice::<BlockchainMessage>(&message.data) {
                 dispatch_blockchain_event(
-                    swarm, transactions, wallets,
-                    peer_id, message, node_state, stakes,
+                    swarm, transactions,
+                    peer_id, message,
+                    node_state, stakes,
                 );
             }
         }
@@ -36,7 +40,7 @@ pub fn dispatch_network_event<H>(
     }
 }
 
-fn dispatch_mdns(swarm: &mut Swarm<BlockchainBehaviour>, event: Event) {
+pub fn dispatch_mdns(swarm: &mut Swarm<BlockchainBehaviour>, event: Event) {
     match event {
         Event::Discovered(list) => {
             for (peer, addr) in list {
@@ -58,52 +62,60 @@ fn dispatch_mdns(swarm: &mut Swarm<BlockchainBehaviour>, event: Event) {
 fn dispatch_blockchain_event(
     swarm: &mut Swarm<BlockchainBehaviour>,
     transactions: &mut Blockchain<Transaction>,
-    wallets: &mut Blockchain<Wallet>, sending_peer: PeerId,
-    message: BlockchainMessage, node_state: &mut NodeState,
-    stakes: &mut Blockchain<Transaction>,
+    sending_peer: PeerId, message: BlockchainMessage,
+    node_state: &mut NodeState, stakes: &mut Blockchain<Transaction>,
 ) {
     match message {
         BlockchainMessage::SubmitTransaction(transaction) => {
             transactions.add_uncommitted(transaction);
-            if transactions.has_enough_uncommitted_data() && node_state.should_create_block() {
-                forge_block(swarm, transactions, node_state);
+            if transactions.has_enough_uncommitted_data() {
+                let bid = node_state.user_wallet()
+                    .to_wallet()
+                    .balance(transactions, stakes) * 75 / 100;
+                node_state.update_bid(StakeBid::bid(bid, node_state.user_wallet().address()));
+                communication::publish_message(
+                    swarm,
+                    BlockchainMessage::Bid(node_state.node_bid().unwrap()),
+                );
             }
         }
         BlockchainMessage::SubmitBlock { block_dto } => {
-            on_submit_block(swarm, transactions, wallets, node_state, stakes, block_dto);
+            on_submit_block(swarm, transactions, node_state, stakes, block_dto);
         }
         BlockchainMessage::Vote { block_valid } => {
-            on_vote_received(swarm, transactions, sending_peer, node_state, block_valid);
+            on_vote_received(transactions, sending_peer, node_state, block_valid);
         }
         BlockchainMessage::Bid(stake_bid) => {
             on_stake_raised(swarm, transactions, sending_peer, node_state, stakes, stake_bid);
         }
         BlockchainMessage::Join(wallet) => {
-            let new_block = BlockCandidate::create_new(
-                vec![wallet], wallets.last_block(),
-            );
-            match new_block {
-                Ok(block) => {
-                    wallets.submit_new_block(block);
-                }
-                Err(error) => println!("{}", error.message())
+            if node_state.voting_in_progress() {
+                communication::publish_message(swarm, BlockchainMessage::JoinDenied)
+            } else {
+                node_state.add_peer_wallet(wallet);
+                communication::publish_message(
+                    swarm, BlockchainMessage::Sync {
+                        transactions: BlockchainDto::from(transactions),
+                        wallets: node_state.wallets().clone(),
+                        stakes: BlockchainDto::from(stakes),
+                    }
+                )
             }
         }
-        BlockchainMessage::Sync { .. } => {}
+        _ => {}
     }
 }
 
 fn on_submit_block(
     swarm: &mut Swarm<BlockchainBehaviour>,
     transactions: &mut Blockchain<Transaction>,
-    wallets: &mut Blockchain<Wallet>,
     node_state: &mut NodeState,
     stakes: &mut Blockchain<Transaction>,
     block_dto: BlockDto<Transaction>,
 ) {
     let block_candidate = BlockCandidate::from(block_dto);
     let transaction_validator = TransactionValidator::new(
-        &wallets, &stakes, &transactions,
+        node_state.wallets(), &stakes, &transactions,
     );
     let block_valid = match transaction_validator.block_valid(&block_candidate) {
         Ok(_) => true,
@@ -125,40 +137,51 @@ fn on_stake_raised(
     sending_peer: PeerId, node_state: &mut NodeState,
     stakes: &mut Blockchain<Transaction>, stake_bid: StakeBid,
 ) {
-    node_state.update_peers_bids(sending_peer, stake_bid);
-    if node_state.all_bade(swarm.connected_peers().count()) {
-        let (winner, bid) = node_state.select_highest_bid();
+    let wallet = node_state.wallets()
+        .iter()
+        .find(|wallet| wallet.address() == stake_bid.transaction().source_address());
+    let wallet = match wallet {
+        None => return,
+        Some(wallet) => wallet.clone()
+    };
+    let balance = wallet.balance(transactions, stakes);
+    if !balance < stake_bid.transaction().amount() {
+        node_state.update_peers_bids(sending_peer, stake_bid);
+        if node_state.all_bade() {
+            let (winner, bid) = node_state.select_highest_bid();
 
-        let stakes_block = match BlockCandidate::create_new(
-            vec![bid.transaction().clone()], stakes.last_block(),
-        ) {
-            Ok(block) => block,
-            Err(_) => panic!("No genesis block")
-        };
+            let stakes_block = match BlockCandidate::create_new(
+                vec![bid.transaction().clone()], stakes.last_block(),
+            ) {
+                Ok(block) => block,
+                Err(_) => panic!("No genesis block")
+            };
 
-        stakes.submit_new_block(stakes_block);
-        node_state.set_block_creator(winner.clone());
-        if node_state.should_create_block() {
-            forge_block(swarm, transactions, node_state);
+            stakes.submit_new_block(stakes_block);
+            if winner == *swarm.local_peer_id() {
+                forge_block(swarm, transactions, node_state);
+            }
+            node_state.set_block_creator(winner.clone());
+            node_state.reset_peer_bids();
         }
-        node_state.reset_peer_bids();
+    } else {
+        swarm.ban_peer_id(sending_peer);
+        node_state.kick(sending_peer, &wallet);
     }
 }
 
 fn on_vote_received(
-    swarm: &mut Swarm<BlockchainBehaviour>, transactions: &mut Blockchain<Transaction>,
+    transactions: &mut Blockchain<Transaction>,
     sending_peer: PeerId, node_state: &mut NodeState, block_valid: bool,
 ) {
     let vote = Vote::new(sending_peer, block_valid);
     node_state.add_vote(vote);
 
-    if node_state.all_voted(swarm.connected_peers().count()) {
+    if node_state.all_voted() {
         let result = node_state.summarize_votes();
         if result.should_append_block() {
             let block_candidate = node_state.take_pending_block().unwrap();
             transactions.submit_new_block(block_candidate);
-        } else {
-            node_state.mark_creator_bad().unwrap();
         }
     }
 }
@@ -166,7 +189,7 @@ fn on_vote_received(
 fn forge_block(
     swarm: &mut Swarm<BlockchainBehaviour>,
     transactions: &mut Blockchain<Transaction>,
-    node_state: &mut NodeState
+    node_state: &mut NodeState,
 ) {
     match try_forge_block(transactions, node_state) {
         Ok(block_candidate) => {

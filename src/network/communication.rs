@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::mem;
 
 use chrono::{DateTime, Utc};
@@ -83,8 +84,8 @@ impl<T> BlockchainDto<T> where T: BlockchainData {
     }
 }
 
-impl<T> From<Blockchain<T>> for BlockchainDto<T> where T: BlockchainData {
-    fn from(blockchain: Blockchain<T>) -> Self {
+impl<T> From<&mut Blockchain<T>> for BlockchainDto<T> where T: BlockchainData {
+    fn from(blockchain: &mut Blockchain<T>) -> Self {
         let blocks = {
             let mut current_block = blockchain.last_block();
             let mut result: Vec<BlockDto<T>> = vec![];
@@ -155,10 +156,11 @@ impl<T> From<BlockCandidate<T>> for BlockDto<T> where T: BlockchainData + Summar
 #[derive(Serialize, Deserialize)]
 pub enum BlockchainMessage {
     Join(Wallet),
+    JoinDenied,
     Sync {
         transactions: BlockchainDto<Transaction>,
-        wallets: BlockchainDto<Wallet>,
-        staked: BlockchainDto<Transaction>
+        wallets: HashSet<Wallet>,
+        stakes: BlockchainDto<Transaction>
     },
     SubmitTransaction(Transaction),
     SubmitBlock {

@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use sha2::{Digest, Sha512};
 
-use crate::blockchain::{self, BlockchainData, Transaction, Wallet, WalletCriteria};
+use crate::blockchain::{self, BlockchainData, Transaction};
 use crate::BlockHash;
 use crate::network::communication::{BlockchainDto, BlockDto};
 
@@ -18,10 +18,6 @@ pub trait Summary {
 
 pub trait BlockchainError {
     fn message(&self) -> String;
-}
-
-pub trait Criteria {
-    fn criteria_fulfilled(&self, hash: &[u8]) -> bool;
 }
 
 pub trait Validate<T> where T: BlockchainData {
@@ -287,7 +283,7 @@ impl<T> Block<T> where T: BlockchainData + Summary {
             previous_block,
             data,
             key,
-            time: None,
+            time: Some(Utc::now()),
             block_number,
         }
     }
@@ -407,24 +403,6 @@ impl<T> Blockchain<T> where T: BlockchainData {
         );
         blockchain.mint(to_mint);
         blockchain
-    }
-
-    pub fn wallet_chain() -> Blockchain<Wallet> {
-        let genesis_block = Block::new(
-            None, vec![
-                Wallet {
-                    address: blockchain::MINTING_WALLET_ADDRESS,
-                    public_key: None,
-                }, Wallet {
-                    address: *blockchain::STAKE_WALLET_ADDRESS,
-                    public_key: None
-                }, Wallet {
-                    address: *blockchain::REWARD_WALLET_ADDRESS,
-                    public_key: None
-                }
-            ], 0, BlockKey::default(),
-        );
-    Blockchain::new(genesis_block, 1, 0)
     }
 
     pub fn last_block(&self) -> &BlockPointer<T> {

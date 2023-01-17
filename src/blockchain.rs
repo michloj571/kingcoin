@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use lazy_static::lazy_static;
 use rsa::{pss::VerifyingKey, RsaPrivateKey, RsaPublicKey, signature::{Signature, Verifier}};
@@ -7,7 +9,8 @@ use rsa::signature::RandomizedSigner;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256, Sha512};
 
-use crate::blockchain::core::{BlockCandidate, Blockchain, BlockchainError, BlockValidationError, Criteria, Summary, Validate};
+use crate::blockchain::core::{BlockCandidate, Blockchain, BlockchainError, BlockValidationError, Summary, Validate};
+use crate::network::NodeState;
 
 pub mod core;
 
@@ -159,7 +162,7 @@ impl Clone for Transaction {
 impl BlockchainData for Transaction {}
 
 pub struct TransactionValidator<'a> {
-    wallets: &'a Blockchain<Wallet>,
+    wallets: &'a HashSet<Wallet>,
     transactions: &'a Blockchain<Transaction>,
     stakes: &'a Blockchain<Transaction>,
 }
@@ -181,7 +184,7 @@ impl<'a> Validate<Transaction> for TransactionValidator<'a> {
 
 impl<'a> TransactionValidator<'a> {
     pub fn new(
-        wallets: &'a Blockchain<Wallet>,
+        wallets: &'a HashSet<Wallet>,
         stakes: &'a Blockchain<Transaction>,
         transactions: &'a Blockchain<Transaction>,
     ) -> TransactionValidator<'a> {
@@ -190,9 +193,6 @@ impl<'a> TransactionValidator<'a> {
             stakes,
             transactions,
         }
-    }
-    pub fn wallets(&self) -> &Blockchain<Wallet> {
-        &self.wallets
     }
 
     fn is_not_special(transaction: &Transaction) -> bool {
@@ -247,10 +247,10 @@ impl<'a> TransactionValidator<'a> {
         };
 
         let source_wallet = find_wallet_by_address(
-            transaction.source_address(), &self.wallets,
+            self.wallets, transaction.source_address(),
         );
 
-        match find_wallet_by_address(transaction.target_address(), &self.wallets) {
+        match find_wallet_by_address(&self.wallets, transaction.target_address()) {
             None => return Err(
                 Box::new(TransactionValidationError)
             ),
@@ -336,23 +336,6 @@ impl<'a> TransactionValidator<'a> {
     }
 }
 
-pub struct TransactionCriteria;
-
-impl Criteria for TransactionCriteria {
-    fn criteria_fulfilled(&self, hash: &[u8]) -> bool {
-        true
-    }
-}
-
-pub struct BlockCriteria;
-
-impl Criteria for BlockCriteria {
-    fn criteria_fulfilled(&self, hash: &[u8]) -> bool {
-        let hash = array_bytes::bytes2hex("", hash);
-        hash.starts_with("000000")
-    }
-}
-
 #[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Hash)]
 pub struct Wallet {
     address: [u8; 32],
@@ -402,24 +385,8 @@ impl HotWallet {
     }
 }
 
-pub struct WalletCriteria;
-
-impl Criteria for WalletCriteria {
-    fn criteria_fulfilled(&self, hash: &[u8]) -> bool {
-        true
-    }
-}
-
-pub struct WalletValidator;
-
-impl Validate<Wallet> for WalletValidator {
-    fn block_valid(&self, block: &BlockCandidate<Wallet>) -> Result<(), Box<dyn BlockchainError>> {
-        todo!()
-    }
-}
-
 impl Wallet {
-    fn new(address: Address, public_key: Option<RsaPublicKey>) -> Wallet {
+    pub fn new(address: Address, public_key: Option<RsaPublicKey>) -> Wallet {
         Wallet {
             address,
             public_key,
@@ -489,6 +456,12 @@ impl Wallet {
     }
 }
 
+pub fn find_wallet_by_address(wallets: &HashSet<Wallet>, address: Address) -> Option<Wallet> {
+    wallets.iter()
+        .find(|wallet| wallet.address() == address)
+        .map(|wallet| wallet.clone())
+}
+
 impl Summary for Wallet {
     fn summary(&self) -> String {
         serde_json::to_string(self).unwrap()
@@ -513,30 +486,6 @@ impl BlockchainError for TransactionValidationError {
     }
 }
 
-pub fn find_wallet_by_address(address: Address, wallet_chain: &Blockchain<Wallet>) -> Option<Wallet> {
-    let mut current_block = wallet_chain.last_block();
-    loop {
-        match current_block {
-            None => break None,
-            Some(block) => {
-                match extract_wallet(block.data(), address) {
-                    None => current_block = block.previous_block(),
-                    Some(wallet) => break Some(wallet)
-                }
-            }
-        }
-    }
-}
-
-fn extract_wallet(data: &Vec<Wallet>, address: Address) -> Option<Wallet> {
-    for entry in data {
-        if entry.address() == address {
-            return Some(entry.clone());
-        }
-    };
-    None
-}
-
 mod test {
     use chrono::Utc;
     use rsa::{RsaPrivateKey, RsaPublicKey};
@@ -546,7 +495,7 @@ mod test {
     use serde::Serialize;
     use sha2::Sha512;
 
-    use crate::blockchain::{BlockchainData, MINTING_WALLET_ADDRESS, Transaction, TRANSACTION_FEE, TransactionCriteria, TransactionValidator, Wallet, WalletCriteria, WalletValidator};
+    use crate::blockchain::{BlockchainData, MINTING_WALLET_ADDRESS, Transaction, TRANSACTION_FEE, TransactionValidator, Wallet};
     use crate::blockchain::core::{Block, BlockCandidate, Blockchain, BlockchainError, BlockKey, BlockPointer, Summary, Validate};
     use crate::BlockHash;
 
@@ -554,7 +503,6 @@ mod test {
     fn ok_on_valid_transaction() {
         let mut rng = rand::thread_rng();
 
-        let mut wallets = Blockchain::<Wallet>::wallet_chain();
         let first_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let second_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();
         let third_key = RsaPrivateKey::new(&mut rng, 2048).unwrap();

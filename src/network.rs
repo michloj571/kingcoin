@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use libp2p::{core::upgrade, gossipsub, identity::Keypair, mdns::{Event, tokio::Behaviour as TokioBehaviour}, mdns, mplex, noise, PeerId, Swarm, swarm::NetworkBehaviour, tcp::{Config, tokio::Transport as TokioTransport}, Transport};
 use libp2p::gossipsub::{Gossipsub, GossipsubEvent, IdentTopic, MessageAuthenticity, ValidationMode};
 
-use crate::blockchain::{HotWallet, StakeBid, Transaction};
+use crate::blockchain::{Address, HotWallet, MINTING_WALLET_ADDRESS, REWARD_WALLET_ADDRESS, STAKE_WALLET_ADDRESS, StakeBid, Transaction, Wallet};
 use crate::blockchain::core::{BlockCandidate, Blockchain};
 use crate::network::communication::{Vote, VotingResult};
 
@@ -21,8 +21,9 @@ pub struct NodeState {
     user_wallet: HotWallet,
     node_bid: Option<StakeBid>,
     peers_bids: HashMap<PeerId, StakeBid>,
+    voting: bool,
+    wallets: HashSet<Wallet>,
     block_creator: Option<PeerId>,
-    bad_peers: HashSet<PeerId>,
     votes: HashSet<Vote>,
     pending_block: Option<BlockCandidate<Transaction>>,
 }
@@ -31,40 +32,64 @@ pub struct NodeState {
 impl NodeState {
     pub fn init(
         node_id: PeerId, user_wallet: HotWallet,
-        transactions: &Blockchain<Transaction>,
-        stakes: &Blockchain<Transaction>,
     ) -> NodeState {
-        let wallet_address = user_wallet.address();
+        let mut wallets = NodeState::default_wallets();
+        wallets.insert(user_wallet.to_wallet());
         NodeState {
             node_id,
             user_wallet,
             node_bid: None,
             peers_bids: HashMap::new(),
+            voting: false,
+            wallets,
             block_creator: None,
-            bad_peers: HashSet::new(),
             votes: HashSet::new(),
             pending_block: None,
         }
+    }
+
+    fn default_wallets() -> HashSet<Wallet> {
+        let mut wallets = HashSet::new();
+        wallets.insert(
+            Wallet::new(
+                MINTING_WALLET_ADDRESS, None,
+            )
+        );
+        wallets.insert(
+            Wallet::new(
+                *REWARD_WALLET_ADDRESS, None,
+            )
+        );
+        wallets.insert(
+            Wallet::new(
+                *STAKE_WALLET_ADDRESS, None,
+            )
+        );
+        wallets
     }
 
     pub fn node_id(&self) -> PeerId {
         self.node_id
     }
 
+    pub fn wallets(&self) -> &HashSet<Wallet> {
+        &self.wallets
+    }
+
+    pub fn add_wallets(&mut self, wallets: HashSet<Wallet>) {
+        self.wallets.extend(wallets);
+    }
+
     pub fn user_wallet(&self) -> &HotWallet {
         &self.user_wallet
     }
 
-    pub fn node_bid(&self) -> &Option<StakeBid> {
-        &self.node_bid
+    pub fn node_bid(&self) -> Option<StakeBid> {
+        self.node_bid.clone()
     }
 
     pub fn peers_bids(&self) -> &HashMap<PeerId, StakeBid> {
         &self.peers_bids
-    }
-
-    pub fn bad_peers(&self) -> &HashSet<PeerId> {
-        &self.bad_peers
     }
 
     pub fn should_create_block(&self) -> bool {
@@ -72,6 +97,14 @@ impl NodeState {
             None => false,
             Some(peer_id) => self.node_id == peer_id
         }
+    }
+
+    pub fn add_peer_wallet(&mut self, wallet: Wallet) {
+        self.wallets.insert(wallet);
+    }
+
+    pub fn voting_in_progress(&self) -> bool {
+        self.voting
     }
 
     pub fn set_block_creator(&mut self, id: PeerId) {
@@ -90,26 +123,17 @@ impl NodeState {
         self.node_bid = Some(bid);
     }
 
-    pub fn all_bade(&self, peer_count: usize) -> bool {
-        self.peers_bids.len() == peer_count
-    }
-
-    pub fn mark_creator_bad(&mut self) -> Result<(), ()> {
-        match &self.block_creator {
-            None => Err(()),
-            Some(creator) => {
-                self.bad_peers.insert(creator.clone());
-                Ok(())
-            }
-        }
+    pub fn all_bade(&self) -> bool {
+        self.peers_bids.len() == self.wallets.len() - 1
     }
 
     pub fn add_vote(&mut self, vote: Vote) {
+        self.voting = true;
         self.votes.insert(vote);
     }
 
-    pub fn all_voted(&self, peer_count: usize) -> bool {
-        self.votes.len() == peer_count
+    pub fn all_voted(&self) -> bool {
+        self.votes.len() == self.wallets.len() - 1
     }
 
     pub fn take_pending_block(&mut self) -> Option<BlockCandidate<Transaction>> {
@@ -131,6 +155,7 @@ impl NodeState {
             }
         }
         self.votes.clear();
+        self.voting = false;
         VotingResult::evaluate(block_valid, block_invalid)
     }
 
@@ -149,8 +174,17 @@ impl NodeState {
             }
         })
     }
+
     pub fn reset_peer_bids(&mut self) {
         self.peers_bids.clear();
+    }
+
+    pub fn kick(&mut self, peer: PeerId, wallet: &Wallet) {
+        self.wallets.remove(wallet);
+        self.peers_bids.remove(&peer);
+    }
+    pub fn set_wallets(&mut self, wallets: HashSet<Wallet>) {
+        self.wallets = wallets;
     }
 }
 
@@ -161,7 +195,6 @@ pub fn configure_swarm() -> Swarm<BlockchainBehaviour> {
     let gossipsub_config = gossipsub::GossipsubConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(10))
         .validation_mode(ValidationMode::Strict)
-        //    .message_id_fn(message_id_fn)
         .build()
         .expect("Valid config");
 
